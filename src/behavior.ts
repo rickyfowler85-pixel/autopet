@@ -1,11 +1,15 @@
 import {
   type Activity,
   type Affordance,
+  type AssistanceSource,
+  type CareDomain,
   type HabitatFeature,
   type HabitatObject,
   type Point,
   type World,
   HABITAT_FEATURES,
+  STEP,
+  clamp,
   random,
   record,
   validPosition,
@@ -19,6 +23,7 @@ export interface Opportunity {
   position: Point;
   score: number;
   assisted: boolean;
+  assistanceSource?: AssistanceSource;
   object?: HabitatObject;
   feature?: HabitatFeature;
 }
@@ -178,6 +183,41 @@ export function resolveOpportunity(w: World, id: string): HabitatObject | Habita
   return w.objects.find(object => object.id === id) ?? HABITAT_FEATURES.find(feature => feature.id === id);
 }
 
+function readinessDrive(readiness: number): number {
+  const activeReadiness = clamp((readiness - 0.45) / 0.55);
+  return 0.015 + 3 * activeReadiness * activeReadiness;
+}
+
+export function careDomainForActivity(activity: Activity): CareDomain | undefined {
+  if (activity === 'forage') return 'feeding';
+  if (activity === 'groom') return 'grooming';
+  return undefined;
+}
+
+/**
+ * A request is a temperament-shaped choice, rather than a need or a failure.
+ * Reliance raises its likelihood while proficiency, confidence, and persistence
+ * make an independent attempt more likely. Ignoring a request never changes the
+ * skill; the normal autonomous attempt follows after the short request phase.
+ */
+export function helpRequestProbability(w: World, domain: CareDomain): number {
+  const skill = w.creature.learning.independence[domain];
+  const agency = skill.capability * 0.45 + skill.confidence * 0.55;
+  return clamp(
+    0.05
+      + skill.reliance * 0.62
+      + (1 - agency) * 0.18
+      - w.creature.temperament.persistence * 0.12,
+    0.03,
+    0.78,
+  );
+}
+
+export function shouldRequestHelp(w: World, activity: Activity): boolean {
+  const domain = careDomainForActivity(activity);
+  return domain !== undefined && random(w, 'social') < helpRequestProbability(w, domain);
+}
+
 function motivation(w: World, activity: Activity): number {
   const creature = w.creature;
   const state = creature.internal;
@@ -187,8 +227,8 @@ function motivation(w: World, activity: Activity): number {
     case 'wander': return 0.75 + temperament.curiosity * 0.55;
     case 'rest': return 0.5 + (1 - state.energy) * 3.5 + temperament.restfulness;
     case 'explore': return 0.6 + temperament.curiosity * 1.5;
-    case 'forage': return 0.65 + state.forageReadiness * 2.6;
-    case 'groom': return 0.55 + state.groomingReadiness * 1.9;
+    case 'forage': return readinessDrive(state.forageReadiness);
+    case 'groom': return readinessDrive(state.groomingReadiness);
     case 'wade': return 0.35 + temperament.curiosity * 0.9;
     case 'play': return 0.35 + temperament.sociability * 1.15 + state.energy * 0.35;
   }
@@ -210,12 +250,20 @@ function scoreOpportunity(
   if (activity === 'rest') score *= 0.75 + (feature?.comfort ?? (object?.kind === 'stone' ? 0.55 : 0.2));
   if (activity === 'forage') {
     const skill = creature.learning.independence.feeding;
-    score *= 0.7 + skill.confidence * 0.45;
-    if (creature.internal.forageReadiness > 0.86) score *= 2.2;
+    const agency = skill.capability * 0.45 + skill.confidence * 0.55;
+    score *= 0.72 + agency * 0.28 - skill.reliance * 0.08;
+    if (object?.kind === 'seedpod') score *= 1.12;
+    if (feature?.kind === 'vegetation') score *= 0.96 + creature.temperament.curiosity * 0.12;
+    // The survival safeguard eventually outweighs learned hesitation.
+    if (creature.internal.forageReadiness > 0.9) score *= 2.5;
   }
   if (activity === 'groom') {
     const skill = creature.learning.independence.grooming;
-    score *= 0.7 + skill.confidence * 0.45;
+    const agency = skill.capability * 0.45 + skill.confidence * 0.55;
+    score *= 0.72 + agency * 0.28 - skill.reliance * 0.08;
+    if (feature?.kind === 'pool') score *= 1.08;
+    if (feature?.kind === 'vegetation') score *= 0.92 + creature.temperament.curiosity * 0.12;
+    if (object?.kind === 'branch') score *= 0.95 + creature.temperament.persistence * 0.16;
   }
   if (creature.internal.energy < 0.2 && activity === 'rest') score *= 3;
   if (creature.internal.energy < 0.2 && (activity === 'play' || activity === 'wander')) score *= 0.2;
@@ -249,6 +297,7 @@ export function availableOpportunities(w: World): Opportunity[] {
         position: object.position,
         score: scoreOpportunity(w, activity, affordance, object.id, object),
         assisted: recentlyMoved,
+        assistanceSource: recentlyMoved ? 'environment-arranged' : undefined,
         object,
       });
     }
@@ -304,6 +353,7 @@ export function beginIntent(w: World, opportunity: Opportunity, invitedTarget?: 
   creature.activity = opportunity.activity;
   creature.target = { ...creature.position };
   creature.remaining = 0;
+  const noticeDuration = 2.4 + random(w) * 3.6;
   creature.intent = {
     id: w.nextIntentId++,
     activity: opportunity.activity,
@@ -313,8 +363,11 @@ export function beginIntent(w: World, opportunity: Opportunity, invitedTarget?: 
     target,
     route,
     noticedAt: w.time,
-    phaseRemaining: 0.8 + random(w) * 1.8,
+    phaseRemaining: noticeDuration,
+    phaseTicksRemaining: Math.ceil(noticeDuration / STEP),
     assisted: opportunity.assisted,
+    ...(opportunity.assistanceSource ? { assistanceSource: opportunity.assistanceSource } : {}),
+    helpRequested: false,
   };
   record(w, 'behavior-noticed', {
     subject: opportunity.id,
@@ -322,6 +375,7 @@ export function beginIntent(w: World, opportunity: Opportunity, invitedTarget?: 
     affordance: opportunity.affordance,
     phase: 'notice',
     assisted: opportunity.assisted,
+    assistanceSource: opportunity.assistanceSource,
   });
   return true;
 }

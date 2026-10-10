@@ -10,20 +10,39 @@ import {
   record,
   validPosition,
 } from './model';
-import { approachTarget, beginIntent, chooseActivity, invitationOpportunity, planRoute, resolveOpportunity } from './behavior';
-import { completeLearning, recordInvitation } from './learning';
+import {
+  approachTarget,
+  beginIntent,
+  careDomainForActivity,
+  chooseActivity,
+  invitationOpportunity,
+  planRoute,
+  resolveOpportunity,
+  shouldRequestHelp,
+} from './behavior';
+import { completeLearning, recordHelpRequest, recordInvitation } from './learning';
+
+const OFFLINE_LIMIT_SECONDS = 30 * 86400;
+const INTERNAL_SCALE = 1_000_000_000;
+
+export interface OfflineAdvanceResult {
+  requestedSeconds: number;
+  simulatedSeconds: number;
+  capped: boolean;
+  ticks: number;
+}
 
 function phaseDuration(w: World, activity: Activity): number {
   const variation = random(w) * 0.35 + 0.85;
   const durations: Record<Activity, number> = {
-    idle: 5.5,
-    wander: 3.5,
-    rest: 15,
-    explore: 5,
-    forage: 7,
-    groom: 7,
-    wade: 6,
-    play: 7,
+    idle: 45,
+    wander: 28,
+    rest: 120,
+    explore: 38,
+    forage: 34,
+    groom: 36,
+    wade: 38,
+    play: 42,
   };
   return durations[activity] * variation;
 }
@@ -57,12 +76,53 @@ function outcomeFor(w: World, activity: Activity, assisted: boolean): Outcome {
   return roll < success ? 'success' : roll < success + partial ? 'partial' : 'deferred';
 }
 
-function updateInternalState(w: World) {
+/**
+ * These rates are exact at nanounit precision. Fixed-point updates make one
+ * large catch-up identical to the same number of live simulation ticks.
+ */
+function applyInternalTicks(w: World, ticks: number) {
+  if (ticks <= 0) return;
   const creature = w.creature;
   const resting = creature.activity === 'rest' && creature.intent?.phase === 'attempt';
-  creature.internal.energy = clamp(creature.internal.energy + (resting ? 0.00055 : -0.00008) * STEP);
-  creature.internal.forageReadiness = clamp(creature.internal.forageReadiness + 0.000075 * STEP);
-  creature.internal.groomingReadiness = clamp(creature.internal.groomingReadiness + 0.000045 * STEP);
+  const energyDelta = resting ? 55_000 : -8_000;
+  const toUnits = (value: number) => Math.round(value * INTERNAL_SCALE);
+  const fromUnits = (value: number) => clamp(value, 0, INTERNAL_SCALE) / INTERNAL_SCALE;
+  creature.internal.energy = fromUnits(toUnits(creature.internal.energy) + energyDelta * ticks);
+  creature.internal.forageReadiness = fromUnits(toUnits(creature.internal.forageReadiness) + 7_500 * ticks);
+  creature.internal.groomingReadiness = fromUnits(toUnits(creature.internal.groomingReadiness) + 4_500 * ticks);
+}
+
+function advanceClock(w: World, ticks: number) {
+  applyInternalTicks(w, ticks);
+  w.tick += ticks;
+  w.time = w.tick * STEP;
+}
+
+function durationTicks(seconds: number): number {
+  return Math.max(1, Math.ceil((Math.max(0, seconds) - 1e-9) / STEP));
+}
+
+function setPhaseTimer(w: World, seconds: number) {
+  const intent = w.creature.intent!;
+  intent.phaseTicksRemaining = durationTicks(seconds);
+  intent.phaseRemaining = intent.phaseTicksRemaining * STEP;
+}
+
+function remainingPhaseTicks(w: World): number {
+  const intent = w.creature.intent!;
+  if (Number.isInteger(intent.phaseTicksRemaining) && intent.phaseTicksRemaining > 0) {
+    return intent.phaseTicksRemaining;
+  }
+  intent.phaseTicksRemaining = durationTicks(intent.phaseRemaining);
+  intent.phaseRemaining = intent.phaseTicksRemaining * STEP;
+  return intent.phaseTicksRemaining;
+}
+
+function consumePhaseTicks(w: World, ticks: number) {
+  const intent = w.creature.intent!;
+  const remaining = remainingPhaseTicks(w) - ticks;
+  intent.phaseTicksRemaining = Math.max(0, remaining);
+  intent.phaseRemaining = intent.phaseTicksRemaining * STEP;
 }
 
 function applyOutcomeEffects(w: World, activity: Activity, outcome: Outcome) {
@@ -72,14 +132,10 @@ function applyOutcomeEffects(w: World, activity: Activity, outcome: Outcome) {
   if (activity === 'groom') w.creature.internal.groomingReadiness = clamp(0.1 + (1 - amount) * 0.45);
 }
 
-function startAttempt(w: World) {
+function beginAttempt(w: World) {
   const intent = w.creature.intent!;
-  const source = resolveOpportunity(w, intent.opportunityId);
-  intent.resolvedPosition = intent.activity === 'idle' || intent.activity === 'wander' || intent.opportunityId === 'player-invitation'
-    ? { ...intent.target }
-    : { ...(source?.position ?? intent.target) };
   intent.phase = 'attempt';
-  intent.phaseRemaining = phaseDuration(w, intent.activity);
+  setPhaseTimer(w, phaseDuration(w, intent.activity));
   w.creature.target = { ...w.creature.position };
   record(w, 'behavior-attempted', {
     subject: intent.opportunityId,
@@ -87,14 +143,40 @@ function startAttempt(w: World) {
     affordance: intent.affordance,
     phase: 'attempt',
     assisted: intent.assisted,
+    assistanceSource: intent.assistanceSource,
   });
+}
+
+function startAttempt(w: World) {
+  const intent = w.creature.intent!;
+  const source = resolveOpportunity(w, intent.opportunityId);
+  intent.resolvedPosition = intent.activity === 'idle' || intent.activity === 'wander' || intent.opportunityId === 'player-invitation'
+    ? { ...intent.target }
+    : { ...(source?.position ?? intent.target) };
+  const domain = careDomainForActivity(intent.activity);
+  if (domain && shouldRequestHelp(w, intent.activity)) {
+    intent.phase = 'request';
+    intent.helpRequested = true;
+    setPhaseTimer(w, 6 + random(w, 'social') * 6);
+    w.creature.target = { ...w.creature.position };
+    recordHelpRequest(w, domain);
+    record(w, 'care-help-requested', {
+      subject: domain,
+      activity: intent.activity,
+      affordance: intent.affordance,
+      phase: 'request',
+      assisted: false,
+    });
+    return;
+  }
+  beginAttempt(w);
 }
 
 function experienceOutcome(w: World, forced?: Outcome) {
   const intent = w.creature.intent!;
   intent.phase = 'outcome';
   intent.outcome = forced ?? outcomeFor(w, intent.activity, intent.assisted);
-  intent.phaseRemaining = 0.6;
+  setPhaseTimer(w, 0.6);
   applyOutcomeEffects(w, intent.activity, intent.outcome);
   record(w, 'behavior-experienced', {
     subject: intent.opportunityId,
@@ -103,6 +185,7 @@ function experienceOutcome(w: World, forced?: Outcome) {
     phase: 'outcome',
     outcome: intent.outcome,
     assisted: intent.assisted,
+    assistanceSource: intent.assistanceSource,
   });
 }
 
@@ -118,9 +201,11 @@ function learnFromOutcome(w: World) {
     intent.assisted,
     w.time - intent.noticedAt,
     intent.resolvedPosition ?? w.creature.position,
+    intent.assistanceSource,
+    intent.helpRequested,
   );
   intent.phase = 'reflect';
-  intent.phaseRemaining = 0.8 + random(w) * 1.8;
+  setPhaseTimer(w, 12 + random(w) * 18);
   record(w, 'behavior-learned', {
     subject: intent.opportunityId,
     activity: intent.activity,
@@ -128,6 +213,7 @@ function learnFromOutcome(w: World) {
     phase: 'reflect',
     outcome,
     assisted: intent.assisted,
+    assistanceSource: intent.assistanceSource,
   });
 }
 
@@ -167,6 +253,7 @@ function cancelIntent(w: World) {
     affordance: intent.affordance,
     phase: intent.phase,
     assisted: intent.assisted,
+    assistanceSource: intent.assistanceSource,
   });
   w.creature.intent = undefined;
   w.creature.target = { ...w.creature.position };
@@ -195,6 +282,7 @@ function moveTowardIntent(w: World) {
       affordance: intent.affordance,
       phase: 'approach',
       assisted: intent.assisted,
+      assistanceSource: intent.assistanceSource,
     });
     startAttempt(w);
     return;
@@ -212,51 +300,71 @@ function moveTowardIntent(w: World) {
   creature.facing = dx < 0 ? -1 : 1;
 }
 
-export function step(w: World) {
-  w.tick++;
-  w.time = w.tick * STEP;
-  updateInternalState(w);
+function finishTimedPhase(w: World) {
   const creature = w.creature;
-  if (!creature.intent) {
-    selectNextIntent(w);
-    return;
-  }
-  const intent = creature.intent;
+  const intent = creature.intent!;
   if (intent.phase === 'notice') {
-    intent.phaseRemaining -= STEP;
-    if (intent.phaseRemaining <= 0) {
-      intent.phase = 'approach';
-      creature.target = { ...(intent.route[0] ?? intent.target) };
-      record(w, 'behavior-approaching', {
-        subject: intent.opportunityId,
-        activity: intent.activity,
-        affordance: intent.affordance,
-        phase: 'approach',
-        assisted: intent.assisted,
-      });
-    }
-  } else if (intent.phase === 'approach') {
-    moveTowardIntent(w);
+    intent.phase = 'approach';
+    creature.target = { ...(intent.route[0] ?? intent.target) };
+    record(w, 'behavior-approaching', {
+      subject: intent.opportunityId,
+      activity: intent.activity,
+      affordance: intent.affordance,
+      phase: 'approach',
+      assisted: intent.assisted,
+      assistanceSource: intent.assistanceSource,
+    });
+  } else if (intent.phase === 'request') {
+    // An unanswered request is only a pause. It carries no failure or absence
+    // penalty and the creature proceeds with an independent attempt.
+    beginAttempt(w);
   } else if (intent.phase === 'attempt') {
-    intent.phaseRemaining -= STEP;
-    if (intent.phaseRemaining <= 0) experienceOutcome(w);
+    experienceOutcome(w);
   } else if (intent.phase === 'outcome') {
-    intent.phaseRemaining -= STEP;
-    if (intent.phaseRemaining <= 0) learnFromOutcome(w);
+    learnFromOutcome(w);
   } else {
-    intent.phaseRemaining -= STEP;
-    if (intent.phaseRemaining <= 0) {
-      creature.intent = undefined;
-      creature.target = { ...creature.position };
-      selectNextIntent(w);
-    }
+    creature.intent = undefined;
+    creature.target = { ...creature.position };
+    selectNextIntent(w);
   }
+}
+
+function processTicks(w: World, requestedTicks: number) {
+  let ticks = Math.max(0, Math.floor(requestedTicks));
+  while (ticks > 0) {
+    const intent = w.creature.intent;
+    if (!intent) {
+      advanceClock(w, 1);
+      selectNextIntent(w);
+      ticks--;
+      continue;
+    }
+    if (intent.phase === 'approach') {
+      // Movement stays tickwise so saved positions and arrival detection retain
+      // exactly the same floating-point path as live rendering.
+      advanceClock(w, 1);
+      moveTowardIntent(w);
+      ticks--;
+      continue;
+    }
+    const phaseTicks = remainingPhaseTicks(w);
+    const consumed = Math.min(ticks, phaseTicks);
+    advanceClock(w, consumed);
+    consumePhaseTicks(w, consumed);
+    ticks -= consumed;
+    if (w.creature.intent && w.creature.intent.phaseTicksRemaining === 0) finishTimedPhase(w);
+  }
+}
+
+export function step(w: World) {
+  processTicks(w, 1);
 }
 
 export function interruptIntent(w: World, opportunityId: string): boolean {
   const intent = w.creature.intent;
   if (!intent || intent.opportunityId !== opportunityId || intent.phase !== 'attempt') return false;
   intent.assisted = true;
+  intent.assistanceSource ??= 'environment-arranged';
   record(w, 'behavior-interrupted', {
     subject: intent.opportunityId,
     activity: intent.activity,
@@ -264,6 +372,7 @@ export function interruptIntent(w: World, opportunityId: string): boolean {
     phase: 'attempt',
     outcome: 'deferred',
     assisted: true,
+    assistanceSource: intent.assistanceSource,
   });
   experienceOutcome(w, 'deferred');
   w.creature.target = { ...w.creature.position };
@@ -281,6 +390,7 @@ export function retargetOpportunity(w: World, opportunityId: string, position: P
   intent.target = target;
   intent.route = route;
   intent.assisted = true;
+  intent.assistanceSource ??= 'environment-arranged';
   w.creature.target = intent.phase === 'notice' ? { ...w.creature.position } : { ...(route[0] ?? target) };
   record(w, 'behavior-retargeted', {
     subject: intent.opportunityId,
@@ -288,17 +398,28 @@ export function retargetOpportunity(w: World, opportunityId: string, position: P
     affordance: intent.affordance,
     phase: intent.phase,
     assisted: true,
+    assistanceSource: intent.assistanceSource,
   });
   return true;
 }
 
 export function advance(w: World, seconds: number) {
-  const ticks = Math.floor(Math.max(0, seconds) / STEP);
-  for (let index = 0; index < ticks; index++) step(w);
+  const duration = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+  const ticks = Math.floor((duration + 1e-9) / STEP);
+  processTicks(w, ticks);
 }
 
-export function advanceOffline(w: World, seconds: number) {
-  advance(w, Math.min(21600, Math.max(0, seconds)));
+export function advanceOffline(w: World, seconds: number): OfflineAdvanceResult {
+  const requestedSeconds = Math.max(0, Number.isFinite(seconds) ? seconds : 0);
+  const limitedSeconds = Math.min(OFFLINE_LIMIT_SECONDS, requestedSeconds);
+  const ticks = Math.floor((limitedSeconds + 1e-9) / STEP);
+  processTicks(w, ticks);
+  return {
+    requestedSeconds,
+    simulatedSeconds: ticks * STEP,
+    capped: requestedSeconds > OFFLINE_LIMIT_SECONDS,
+    ticks,
+  };
 }
 
 export function interact(w: World, event: PlayerEvent) {

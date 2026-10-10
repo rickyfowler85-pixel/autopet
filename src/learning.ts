@@ -1,19 +1,24 @@
 import {
   type Activity,
   type Affordance,
+  type AssistanceSource,
   type CareDomain,
-  type EvidenceSummary,
   type ObjectKind,
   type Outcome,
   type Point,
   type World,
   clamp,
-  emptySummary,
+  random,
   record,
 } from './model';
+import {
+  recordCareInteraction,
+  recordDevelopmentOutcome,
+  recordInvitationEvidence,
+  recordSocialReactionEvidence,
+} from './evidence';
 
 const HABITUATION_HALF_LIFE = 900;
-const MAX_OUTCOMES = 240;
 
 function rebalance<T extends string>(
   distribution: Record<T, number>,
@@ -72,36 +77,61 @@ export function markHabituation(w: World, opportunityId: string) {
   };
 }
 
-function summaryFor(recordMap: Record<string, EvidenceSummary>, key: string): EvidenceSummary {
-  return recordMap[key] ?? (recordMap[key] = emptySummary());
+function directCareSource(domain: CareDomain, source?: AssistanceSource): boolean {
+  return source === (domain === 'feeding' ? 'player-feeding' : 'player-grooming');
 }
 
-function updateSummary(summary: EvidenceSummary, w: World, outcome: Outcome, assisted: boolean, duration: number) {
-  summary.attempts++;
-  if (outcome === 'success') summary.successes++;
-  else if (outcome === 'partial') summary.partials++;
-  else summary.deferred++;
-  if (assisted) summary.assisted++;
-  summary.totalSeconds += Math.max(0, duration);
-  summary.firstAt ??= w.time;
-  summary.lastAt = w.time;
-}
-
-function updateIndependence(w: World, domain: CareDomain, outcome: Outcome, assisted: boolean) {
+function updateIndependence(
+  w: World,
+  domain: CareDomain,
+  outcome: Outcome,
+  assistanceSource?: AssistanceSource,
+  requested = false,
+) {
   const skill = w.creature.learning.independence[domain];
-  const quality = outcome === 'success' ? 1 : outcome === 'partial' ? 0.5 : 0;
+  const quality = outcome === 'success' ? 1 : outcome === 'partial' ? 0.55 : 0.15;
+  const assisted = directCareSource(domain, assistanceSource);
   skill.attempts++;
   if (outcome === 'success') skill.successes++;
   if (assisted) {
     skill.assisted++;
-    skill.reliance = clamp(skill.reliance + 0.012 * (1 - skill.reliance), 0, 0.85);
-    skill.capability = clamp(skill.capability + 0.00002 * quality, 0.2, 0.88);
+    skill.assistedAttempts++;
+    if (outcome === 'success') skill.assistedSuccesses++;
+    skill.capability = clamp(
+      skill.capability + 0.0007 * (0.3 + 0.7 * quality) * (0.82 - skill.capability),
+      0.2,
+      0.94,
+    );
+    skill.confidence = clamp(
+      skill.confidence + 0.004 * quality * Math.max(0, 0.72 - skill.confidence),
+      0.08,
+      0.92,
+    );
+    skill.reliance = clamp(
+      skill.reliance + (requested ? 0.007 : 0.004) * quality * (0.9 - skill.reliance),
+      0,
+      0.9,
+    );
   } else {
-    skill.capability = clamp(skill.capability + (0.00005 + 0.00012 * quality) * (0.88 - skill.capability), 0.2, 0.88);
-    skill.reliance = clamp(skill.reliance - 0.0025 * quality * skill.reliance, 0, 0.85);
+    skill.autonomousAttempts++;
+    if (outcome === 'success') skill.autonomousSuccesses++;
+    skill.capability = clamp(
+      skill.capability + 0.0045 * (0.3 + 0.7 * quality) * (0.94 - skill.capability),
+      0.2,
+      0.94,
+    );
+    const confidenceTarget = 0.22 + 0.7 * quality;
+    skill.confidence = clamp(
+      skill.confidence + 0.04 * (confidenceTarget - skill.confidence),
+      0.08,
+      0.92,
+    );
+    skill.reliance = clamp(
+      skill.reliance * (1 - 0.008 * (0.3 + 0.7 * quality)),
+      0,
+      0.9,
+    );
   }
-  const confidenceTarget = outcome === 'success' ? 0.85 : outcome === 'partial' ? 0.5 : 0.18;
-  skill.confidence = clamp(skill.confidence + 0.004 * (confidenceTarget - skill.confidence), 0.08, 0.92);
 }
 
 export function completeLearning(
@@ -113,17 +143,24 @@ export function completeLearning(
   assisted: boolean,
   duration: number,
   position: Point = w.creature.position,
+  assistanceSource?: AssistanceSource,
+  requested = false,
 ) {
   const evidence = w.development.evidence;
   const priorActivity = evidence.activities[activity];
   const expectedQuality = priorActivity.attempts > 4
     ? (priorActivity.successes + priorActivity.partials * 0.5) / priorActivity.attempts
     : 0.65;
-  updateSummary(evidence.activities[activity], w, outcome, assisted, duration);
-  updateSummary(summaryFor(evidence.affordances as Record<string, EvidenceSummary>, affordance), w, outcome, assisted, duration);
-  updateSummary(summaryFor(evidence.opportunities, opportunityId), w, outcome, assisted, duration);
-  evidence.outcomes.push({ time: w.time, activity, affordance, opportunityId, position: { ...position }, outcome, assisted });
-  if (evidence.outcomes.length > MAX_OUTCOMES) evidence.outcomes.shift();
+  recordDevelopmentOutcome(w, {
+    activity,
+    affordance,
+    opportunityId,
+    outcome,
+    assisted,
+    duration,
+    position,
+    assistanceSource,
+  });
 
   const quality = outcome === 'success' ? 1 : outcome === 'partial' ? 0.5 : 0;
   const signal = quality - expectedQuality;
@@ -134,32 +171,73 @@ export function completeLearning(
     object.visits++;
     w.development.observations++;
   }
-  if (activity === 'forage') updateIndependence(w, 'feeding', outcome, assisted);
-  if (activity === 'groom') updateIndependence(w, 'grooming', outcome, assisted);
+  if (activity === 'forage') updateIndependence(w, 'feeding', outcome, assistanceSource, requested);
+  if (activity === 'groom') updateIndependence(w, 'grooming', outcome, assistanceSource, requested);
   markHabituation(w, `${opportunityId}:${affordance}`);
   markHabituation(w, `activity:${activity}`);
-  record(w, 'behavior-outcome', { subject: opportunityId, activity, affordance, phase: 'outcome', outcome, assisted });
+  record(w, 'behavior-outcome', {
+    subject: opportunityId,
+    activity,
+    affordance,
+    phase: 'outcome',
+    outcome,
+    assisted,
+    assistanceSource,
+  });
 }
 
-export function assistCare(w: World, domain: CareDomain) {
+/**
+ * Offers optional care to the creature's current intention. Acceptance only
+ * marks that intention; its normal attempt, outcome, state effects, and
+ * learning still happen in the simulation sequence.
+ */
+export function assistCare(w: World, domain: CareDomain): boolean {
+  const intent = w.creature.intent;
   const activity: Activity = domain === 'feeding' ? 'forage' : 'groom';
-  const affordance: Affordance = domain === 'feeding' ? 'forage' : 'groom';
-  completeLearning(w, activity, affordance, `player-${domain}-assistance`, 'success', true, 0);
-  record(w, 'care-assisted', { subject: domain, activity, affordance, outcome: 'success', assisted: true });
+  if (!intent || intent.activity !== activity || (intent.phase !== 'request' && intent.phase !== 'attempt')) return false;
+  if (intent.careOfferResolved || directCareSource(domain, intent.assistanceSource)) return false;
+
+  intent.careOfferResolved = true;
+  recordCareInteraction(w, domain, 'help-offer');
+  const skill = w.creature.learning.independence[domain];
+  const readiness = domain === 'feeding'
+    ? w.creature.internal.forageReadiness
+    : w.creature.internal.groomingReadiness;
+  const acceptanceChance = clamp(
+    0.14 + readiness * 0.22 + w.creature.temperament.sociability * 0.18 + skill.reliance * 0.34,
+    0.12,
+    0.82,
+  );
+  const accepted = intent.helpRequested || random(w, 'social') < acceptanceChance;
+  recordCareInteraction(w, domain, accepted ? 'help-accepted' : 'help-declined');
+  if (!accepted) {
+    record(w, 'care-declined', { subject: domain, activity, affordance: intent.affordance, phase: intent.phase });
+    return false;
+  }
+
+  intent.assisted = true;
+  intent.assistanceSource = domain === 'feeding' ? 'player-feeding' : 'player-grooming';
+  record(w, 'care-accepted', {
+    subject: domain,
+    activity,
+    affordance: intent.affordance,
+    phase: intent.phase,
+    assisted: true,
+    assistanceSource: intent.assistanceSource,
+  });
+  return true;
+}
+
+export function recordHelpRequest(w: World, domain: CareDomain) {
+  recordCareInteraction(w, domain, 'help-request');
 }
 
 export function recordInvitation(w: World, accepted: boolean) {
-  const social = w.development.evidence.social;
-  social.invitations++;
-  if (accepted) social.accepted++;
-  else social.declined++;
+  recordInvitationEvidence(w, accepted);
 }
 
 export function recordSocialReaction(w: World, kind: 'acknowledgment' | 'pet-accepted' | 'pet-deferred') {
-  const social = w.development.evidence.social;
-  if (kind === 'acknowledgment') social.acknowledgments++;
-  else if (kind === 'pet-accepted') social.petAccepted++;
-  else social.petDeferred++;
+  recordSocialReactionEvidence(w, kind);
 }
 
 export function objectInterest(w: World, kind?: ObjectKind): number {

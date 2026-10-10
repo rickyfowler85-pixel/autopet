@@ -6,9 +6,12 @@ export const OBJECT_KINDS = ['branch', 'stone', 'seedpod'] as const;
 export type ObjectKind = typeof OBJECT_KINDS[number];
 export const AFFORDANCES = ['observe', 'roam', 'rest', 'investigate', 'forage', 'groom', 'wade', 'play'] as const;
 export type Affordance = typeof AFFORDANCES[number];
-export type IntentPhase = 'notice' | 'approach' | 'attempt' | 'outcome' | 'reflect';
+export const DEVELOPMENT_CONTEXTS = ['shelter', 'pool', 'vegetation', 'clearing', 'branch', 'stone', 'seedpod', 'player', 'other'] as const;
+export type DevelopmentContext = typeof DEVELOPMENT_CONTEXTS[number];
+export type IntentPhase = 'notice' | 'approach' | 'request' | 'attempt' | 'outcome' | 'reflect';
 export type Outcome = 'success' | 'partial' | 'deferred';
 export type CareDomain = 'feeding' | 'grooming';
+export type AssistanceSource = 'environment-arranged' | 'player-feeding' | 'player-grooming';
 
 export interface Anatomy {
   stage: 'juvenile';
@@ -30,6 +33,14 @@ export interface IndependenceSkill {
   attempts: number;
   successes: number;
   assisted: number;
+  autonomousAttempts: number;
+  autonomousSuccesses: number;
+  assistedAttempts: number;
+  assistedSuccesses: number;
+  helpRequests: number;
+  helpOffers: number;
+  helpAccepted: number;
+  helpDeclined: number;
 }
 
 export interface Habituation {
@@ -60,7 +71,11 @@ export interface BehaviorIntent {
   route: Point[];
   noticedAt: number;
   phaseRemaining: number;
+  phaseTicksRemaining: number;
   assisted: boolean;
+  assistanceSource?: AssistanceSource;
+  helpRequested: boolean;
+  careOfferResolved?: boolean;
   outcome?: Outcome;
   resolvedPosition?: Point;
 }
@@ -105,6 +120,7 @@ export interface Experience {
   phase?: IntentPhase;
   outcome?: Outcome;
   assisted?: boolean;
+  assistanceSource?: AssistanceSource;
 }
 
 export interface EvidenceSummary {
@@ -126,6 +142,48 @@ export interface DevelopmentOutcome {
   position: Point;
   outcome: Outcome;
   assisted: boolean;
+  assistanceSource?: AssistanceSource;
+}
+
+export interface PeriodTally {
+  attempts: number;
+  successes: number;
+  partials: number;
+  deferred: number;
+  totalSeconds: number;
+}
+
+export interface CarePeriodTally {
+  autonomous: PeriodTally;
+  playerAssisted: PeriodTally;
+  playerInfluenced: PeriodTally;
+  helpRequests: number;
+  helpOffers: number;
+  helpAccepted: number;
+  helpDeclined: number;
+}
+
+export interface SocialEvidence {
+  invitations: number;
+  accepted: number;
+  declined: number;
+  acknowledgments: number;
+  petAccepted: number;
+  petDeferred: number;
+}
+
+export interface DevelopmentDay {
+  day: number;
+  activities: Partial<Record<Activity, PeriodTally>>;
+  affordances: Partial<Record<Affordance, PeriodTally>>;
+  contexts: Partial<Record<DevelopmentContext, PeriodTally>>;
+  care: Record<CareDomain, CarePeriodTally>;
+  social: SocialEvidence;
+}
+
+export interface RollingDevelopmentEvidence {
+  coverageStartedAt: number;
+  days: DevelopmentDay[];
 }
 
 export interface DevelopmentEvidence {
@@ -133,14 +191,8 @@ export interface DevelopmentEvidence {
   affordances: Partial<Record<Affordance, EvidenceSummary>>;
   opportunities: Record<string, EvidenceSummary>;
   outcomes: DevelopmentOutcome[];
-  social: {
-    invitations: number;
-    accepted: number;
-    declined: number;
-    acknowledgments: number;
-    petAccepted: number;
-    petDeferred: number;
-  };
+  social: SocialEvidence;
+  rolling: RollingDevelopmentEvidence;
 }
 
 export interface PlayerEvent { type: 'invite'; position: Point }
@@ -152,7 +204,7 @@ export interface DevelopmentState {
 }
 
 export interface World {
-  version: 2;
+  version: 3;
   identitySeed: number;
   seed: number;
   outcomeSeed: number;
@@ -199,7 +251,11 @@ export function clamp(value: number, minimum = 0, maximum = 1): number {
 
 export function record(w: World, kind: string, details?: string | Omit<Experience, 'time' | 'kind'>) {
   const extra = typeof details === 'string' ? { subject: details } : details ?? {};
-  w.experiences.push({ time: w.time, kind, ...extra });
+  const event: Experience = { time: w.time, kind, ...extra };
+  for (const key of Object.keys(event) as (keyof Experience)[]) {
+    if (event[key] === undefined) delete event[key];
+  }
+  w.experiences.push(event);
   if (w.experiences.length > 80) w.experiences.shift();
 }
 
@@ -207,13 +263,34 @@ export function emptySummary(): EvidenceSummary {
   return { attempts: 0, successes: 0, partials: 0, deferred: 0, assisted: 0, totalSeconds: 0, firstAt: null, lastAt: null };
 }
 
-export function emptyEvidence(): DevelopmentEvidence {
+export function emptyPeriodTally(): PeriodTally {
+  return { attempts: 0, successes: 0, partials: 0, deferred: 0, totalSeconds: 0 };
+}
+
+export function emptyCarePeriodTally(): CarePeriodTally {
+  return {
+    autonomous: emptyPeriodTally(),
+    playerAssisted: emptyPeriodTally(),
+    playerInfluenced: emptyPeriodTally(),
+    helpRequests: 0,
+    helpOffers: 0,
+    helpAccepted: 0,
+    helpDeclined: 0,
+  };
+}
+
+export function emptySocialEvidence(): SocialEvidence {
+  return { invitations: 0, accepted: 0, declined: 0, acknowledgments: 0, petAccepted: 0, petDeferred: 0 };
+}
+
+export function emptyEvidence(coverageStartedAt = 0): DevelopmentEvidence {
   return {
     activities: Object.fromEntries(ACTIVITIES.map(activity => [activity, emptySummary()])) as Record<Activity, EvidenceSummary>,
     affordances: {},
     opportunities: {},
     outcomes: [],
-    social: { invitations: 0, accepted: 0, declined: 0, acknowledgments: 0, petAccepted: 0, petDeferred: 0 },
+    social: emptySocialEvidence(),
+    rolling: { coverageStartedAt, days: [] },
   };
 }
 
@@ -249,7 +326,7 @@ export function createWorld(seed = 42891): World {
     play: 0.07 + temperament.sociability * 0.06,
   });
   return {
-    version: 2,
+    version: 3,
     identitySeed: stableSeed,
     seed: stableSeed,
     outcomeSeed: (stableSeed ^ 0x9e3779b9) >>> 0 || 1,
@@ -273,8 +350,16 @@ export function createWorld(seed = 42891): World {
         objectInterests: normalize<ObjectKind>({ branch: 1, stone: 1, seedpod: 1 }),
         habituation: {},
         independence: {
-          feeding: { capability: 0.3, confidence: 0.28, reliance: 0.12, attempts: 0, successes: 0, assisted: 0 },
-          grooming: { capability: 0.25, confidence: 0.25, reliance: 0.12, attempts: 0, successes: 0, assisted: 0 },
+          feeding: {
+            capability: 0.3, confidence: 0.28, reliance: 0.12, attempts: 0, successes: 0, assisted: 0,
+            autonomousAttempts: 0, autonomousSuccesses: 0, assistedAttempts: 0, assistedSuccesses: 0,
+            helpRequests: 0, helpOffers: 0, helpAccepted: 0, helpDeclined: 0,
+          },
+          grooming: {
+            capability: 0.25, confidence: 0.25, reliance: 0.12, attempts: 0, successes: 0, assisted: 0,
+            autonomousAttempts: 0, autonomousSuccesses: 0, assistedAttempts: 0, assistedSuccesses: 0,
+            helpRequests: 0, helpOffers: 0, helpAccepted: 0, helpDeclined: 0,
+          },
         },
       },
     },

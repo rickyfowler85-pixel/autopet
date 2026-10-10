@@ -4,7 +4,13 @@ import { retargetOpportunity } from './simulation';
 
 export type ReactionKind = 'acknowledge' | 'pet' | 'sleepy';
 export interface Reaction { kind: ReactionKind; until: number }
-export interface InteractionView { reaction?: Reaction; drag?: { id: string; position: Point }; selected?: string }
+export interface InteractionFeedback { text: string; until: number }
+export interface InteractionView {
+  reaction?: Reaction;
+  feedback?: InteractionFeedback;
+  drag?: { id: string; position: Point };
+  selected?: string;
+}
 export function hitCreature(w: World, p: Point): boolean {
   return Math.abs(p.x-w.creature.position.x)<19 && p.y>w.creature.position.y-25 && p.y<w.creature.position.y+7;
 }
@@ -25,12 +31,12 @@ export function placement(w: World, id: string, p: Point): Point {
   for(let y=148;y<=230;y+=2)for(let x=68;x<=330;x+=2){const q={x,y};const d=(x-p.x)**2+(y-p.y)**2;if(d<distance&&validPlacement(w,id,q)){best=q;distance=d}}
   return {...best};
 }
-export function moveObject(w: World, id: string, p: Point): boolean {
+export function moveObject(w: World, id: string, p: Point, options: { retarget?: boolean } = {}): boolean {
  const o=w.objects.find(o=>o.id===id);if(!o)return false;
  o.position=placement(w,id,p);
  const meaningfulMove=o.lastMovedAt!==w.time;o.lastMovedAt=w.time;
  if(meaningfulMove)record(w,'object-moved',o.kind);
- retargetOpportunity(w,id,o.position);
+ if(options.retarget !== false)retargetOpportunity(w,id,o.position);
  return true;
 }
 export function greet(w: World, pet: boolean, now: number): Reaction {
