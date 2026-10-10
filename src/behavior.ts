@@ -1,11 +1,343 @@
-import { approach } from './interaction';
-import { type World, type Point, random, validPosition, record, SHELTER } from './model';
-export function destination(w: World): Point { for(let i=0;i<40;i++){const p={x:70+random(w)*265,y:146+random(w)*85};if(validPosition(p))return p} return {x:190,y:190} }
+import {
+  type Activity,
+  type Affordance,
+  type HabitatFeature,
+  type HabitatObject,
+  type Point,
+  type World,
+  HABITAT_FEATURES,
+  random,
+  record,
+  validPosition,
+} from './model';
+import { habituationLevel, objectInterest } from './learning';
+
+export interface Opportunity {
+  id: string;
+  activity: Activity;
+  affordance: Affordance;
+  position: Point;
+  score: number;
+  assisted: boolean;
+  object?: HabitatObject;
+  feature?: HabitatFeature;
+}
+
+const ACTIVITY_FOR_AFFORDANCE: Record<Affordance, Activity> = {
+  observe: 'idle',
+  roam: 'wander',
+  rest: 'rest',
+  investigate: 'explore',
+  forage: 'forage',
+  groom: 'groom',
+  wade: 'wade',
+  play: 'play',
+};
+
+export function destination(w: World): Point {
+  for (let index = 0; index < 40; index++) {
+    const point = { x: 70 + random(w) * 265, y: 146 + random(w) * 85 };
+    if (validPosition(point)) return point;
+  }
+  return { x: 190, y: 190 };
+}
+
+export function approachTarget(position: Point): Point {
+  const offsets = [
+    { x: -18, y: 8 }, { x: 18, y: 8 }, { x: 0, y: 18 }, { x: 0, y: -15 },
+    { x: -12, y: 14 }, { x: 12, y: 14 },
+  ];
+  return offsets.map(offset => ({ x: position.x + offset.x, y: position.y + offset.y })).find(validPosition)
+    ?? (validPosition(position) ? { ...position } : { x: 202, y: 194 });
+}
+
+const ROUTE_GRID = 5;
+const ROUTE_NEIGHBORS = [
+  { x: -ROUTE_GRID, y: 0 }, { x: ROUTE_GRID, y: 0 },
+  { x: 0, y: -ROUTE_GRID }, { x: 0, y: ROUTE_GRID },
+  { x: -ROUTE_GRID, y: -ROUTE_GRID }, { x: ROUTE_GRID, y: -ROUTE_GRID },
+  { x: -ROUTE_GRID, y: ROUTE_GRID }, { x: ROUTE_GRID, y: ROUTE_GRID },
+];
+
+export function lineClear(from: Point, to: Point): boolean {
+  if (!validPosition(from) || !validPosition(to)) return false;
+  // The world bounds are convex. In normalized pond space, the remaining
+  // obstacle is a unit circle, so the closest point on the segment is exact.
+  const ax = (from.x - 333) / 66;
+  const ay = (from.y - 166) / 31;
+  const bx = (to.x - 333) / 66;
+  const by = (to.y - 166) / 31;
+  const dx = bx - ax;
+  const dy = by - ay;
+  const denominator = dx * dx + dy * dy;
+  const amount = denominator === 0 ? 0 : Math.max(0, Math.min(1, -(ax * dx + ay * dy) / denominator));
+  const closestX = ax + dx * amount;
+  const closestY = ay + dy * amount;
+  return closestX * closestX + closestY * closestY >= 1;
+}
+
+function routeKey(point: Point): string {
+  return `${point.x},${point.y}`;
+}
+
+function gridPoint(key: string): Point {
+  const [x, y] = key.split(',').map(Number);
+  return { x, y };
+}
+
+function nearestVisibleGridPoint(point: Point): Point | undefined {
+  let nearest: Point | undefined;
+  let nearestDistance = Infinity;
+  for (let y = 139; y <= 239; y += ROUTE_GRID) {
+    for (let x = 54; x <= 344; x += ROUTE_GRID) {
+      const candidate = { x, y };
+      const distance = (candidate.x - point.x) ** 2 + (candidate.y - point.y) ** 2;
+      if (distance < nearestDistance && validPosition(candidate) && lineClear(point, candidate)) {
+        nearest = candidate;
+        nearestDistance = distance;
+      }
+    }
+  }
+  return nearest;
+}
+
+function compressRoute(start: Point, points: Point[]): Point[] {
+  const route: Point[] = [];
+  let cursor = { ...start };
+  let index = 0;
+  while (index < points.length) {
+    let furthest = index;
+    for (let candidate = points.length - 1; candidate >= index; candidate--) {
+      if (lineClear(cursor, points[candidate])) {
+        furthest = candidate;
+        break;
+      }
+    }
+    route.push({ ...points[furthest] });
+    cursor = points[furthest];
+    index = furthest + 1;
+  }
+  return route;
+}
+
+/** Returns deterministic, remaining waypoints including the exact destination. */
+export function planRoute(start: Point, target: Point): Point[] | null {
+  if (!validPosition(start) || !validPosition(target)) return null;
+  if (Math.hypot(target.x - start.x, target.y - start.y) <= 0.8) return [];
+  if (lineClear(start, target)) return [{ ...target }];
+
+  const first = nearestVisibleGridPoint(start);
+  const last = nearestVisibleGridPoint(target);
+  if (!first || !last) return null;
+  const firstKey = routeKey(first);
+  const lastKey = routeKey(last);
+  const frontier = new Set([firstKey]);
+  const previous = new Map<string, string>();
+  const distance = new Map<string, number>([[firstKey, 0]]);
+
+  while (frontier.size > 0) {
+    let currentKey = '';
+    let currentScore = Infinity;
+    for (const key of frontier) {
+      const point = gridPoint(key);
+      const score = (distance.get(key) ?? Infinity) + Math.hypot(last.x - point.x, last.y - point.y);
+      if (score < currentScore || (score === currentScore && key < currentKey)) {
+        currentKey = key;
+        currentScore = score;
+      }
+    }
+    if (currentKey === lastKey) break;
+    frontier.delete(currentKey);
+    const current = gridPoint(currentKey);
+    for (const offset of ROUTE_NEIGHBORS) {
+      const neighbor = { x: current.x + offset.x, y: current.y + offset.y };
+      if (neighbor.x < 54 || neighbor.x > 344 || neighbor.y < 139 || neighbor.y > 239
+        || !validPosition(neighbor) || !lineClear(current, neighbor)) continue;
+      const neighborKey = routeKey(neighbor);
+      const candidateDistance = (distance.get(currentKey) ?? 0) + Math.hypot(offset.x, offset.y);
+      if (candidateDistance < (distance.get(neighborKey) ?? Infinity)) {
+        distance.set(neighborKey, candidateDistance);
+        previous.set(neighborKey, currentKey);
+        frontier.add(neighborKey);
+      }
+    }
+  }
+  if (!distance.has(lastKey)) return null;
+  const reversed = [last];
+  let cursor = lastKey;
+  while (cursor !== firstKey) {
+    cursor = previous.get(cursor)!;
+    reversed.push(gridPoint(cursor));
+  }
+  reversed.reverse();
+  const points = [...reversed, { ...target }];
+  return compressRoute(start, points);
+}
+
+export function resolveOpportunity(w: World, id: string): HabitatObject | HabitatFeature | undefined {
+  return w.objects.find(object => object.id === id) ?? HABITAT_FEATURES.find(feature => feature.id === id);
+}
+
+function motivation(w: World, activity: Activity): number {
+  const creature = w.creature;
+  const state = creature.internal;
+  const temperament = creature.temperament;
+  switch (activity) {
+    case 'idle': return 0.9 + (1 - temperament.curiosity) * 0.45;
+    case 'wander': return 0.75 + temperament.curiosity * 0.55;
+    case 'rest': return 0.5 + (1 - state.energy) * 3.5 + temperament.restfulness;
+    case 'explore': return 0.6 + temperament.curiosity * 1.5;
+    case 'forage': return 0.65 + state.forageReadiness * 2.6;
+    case 'groom': return 0.55 + state.groomingReadiness * 1.9;
+    case 'wade': return 0.35 + temperament.curiosity * 0.9;
+    case 'play': return 0.35 + temperament.sociability * 1.15 + state.energy * 0.35;
+  }
+}
+
+function scoreOpportunity(
+  w: World,
+  activity: Activity,
+  affordance: Affordance,
+  id: string,
+  object?: HabitatObject,
+  feature?: HabitatFeature,
+): number {
+  const creature = w.creature;
+  let score = creature.learning.activityPreferences[activity] * motivation(w, activity);
+  score *= 1 - habituationLevel(w, `activity:${activity}`) * 0.55;
+  score *= 1 - habituationLevel(w, `${id}:${affordance}`) * 0.68;
+  if (object) score *= 0.6 + objectInterest(w, object.kind) * 2.3;
+  if (activity === 'rest') score *= 0.75 + (feature?.comfort ?? (object?.kind === 'stone' ? 0.55 : 0.2));
+  if (activity === 'forage') {
+    const skill = creature.learning.independence.feeding;
+    score *= 0.7 + skill.confidence * 0.45;
+    if (creature.internal.forageReadiness > 0.86) score *= 2.2;
+  }
+  if (activity === 'groom') {
+    const skill = creature.learning.independence.grooming;
+    score *= 0.7 + skill.confidence * 0.45;
+  }
+  if (creature.internal.energy < 0.2 && activity === 'rest') score *= 3;
+  if (creature.internal.energy < 0.2 && (activity === 'play' || activity === 'wander')) score *= 0.2;
+  return Math.max(0.0001, score);
+}
+
+export function availableOpportunities(w: World): Opportunity[] {
+  const opportunities: Opportunity[] = [];
+  for (const feature of HABITAT_FEATURES) {
+    for (const affordance of feature.affordances) {
+      const activity = ACTIVITY_FOR_AFFORDANCE[affordance];
+      opportunities.push({
+        id: feature.id,
+        activity,
+        affordance,
+        position: feature.position,
+        score: scoreOpportunity(w, activity, affordance, feature.id, undefined, feature),
+        assisted: false,
+        feature,
+      });
+    }
+  }
+  for (const object of w.objects) {
+    for (const affordance of object.affordances) {
+      const activity = ACTIVITY_FOR_AFFORDANCE[affordance];
+      const recentlyMoved = object.lastMovedAt !== undefined && w.time - object.lastMovedAt < 600;
+      opportunities.push({
+        id: object.id,
+        activity,
+        affordance,
+        position: object.position,
+        score: scoreOpportunity(w, activity, affordance, object.id, object),
+        assisted: recentlyMoved,
+        object,
+      });
+    }
+  }
+  return opportunities;
+}
+
+function selectOpportunity(w: World): Opportunity {
+  const opportunities = availableOpportunities(w);
+  const groups = new Map<Activity, Opportunity[]>();
+  for (const opportunity of opportunities) {
+    const group = groups.get(opportunity.activity) ?? [];
+    group.push(opportunity);
+    groups.set(opportunity.activity, group);
+  }
+  const activityGroups = [...groups.entries()].map(([activity, entries]) => ({
+    activity,
+    entries,
+    score: entries.reduce((sum, entry) => sum + entry.score, 0) / entries.length,
+  }));
+  let activityRoll = random(w) * activityGroups.reduce((sum, group) => sum + group.score, 0);
+  let selectedGroup = activityGroups[activityGroups.length - 1];
+  for (const group of activityGroups) {
+    activityRoll -= group.score;
+    if (activityRoll <= 0) { selectedGroup = group; break; }
+  }
+  let opportunityRoll = random(w) * selectedGroup.entries.reduce((sum, entry) => sum + entry.score, 0);
+  for (const opportunity of selectedGroup.entries) {
+    opportunityRoll -= opportunity.score;
+    if (opportunityRoll <= 0) return opportunity;
+  }
+  return selectedGroup.entries[selectedGroup.entries.length - 1];
+}
+
+export function beginIntent(w: World, opportunity: Opportunity, invitedTarget?: Point) {
+  const creature = w.creature;
+  const target = invitedTarget
+    ? { ...invitedTarget }
+    : opportunity.activity === 'idle' ? { ...creature.position }
+    : opportunity.activity === 'wander' ? destination(w)
+    : opportunity.feature ? { ...opportunity.position }
+    : approachTarget(opportunity.position);
+  const route = planRoute(creature.position, target);
+  if (!route) {
+    record(w, 'behavior-unreachable', {
+      subject: opportunity.id,
+      activity: opportunity.activity,
+      affordance: opportunity.affordance,
+      assisted: opportunity.assisted,
+    });
+    return false;
+  }
+  creature.activity = opportunity.activity;
+  creature.target = { ...creature.position };
+  creature.remaining = 0;
+  creature.intent = {
+    id: w.nextIntentId++,
+    activity: opportunity.activity,
+    phase: 'notice',
+    opportunityId: opportunity.id,
+    affordance: opportunity.affordance,
+    target,
+    route,
+    noticedAt: w.time,
+    phaseRemaining: 0.8 + random(w) * 1.8,
+    assisted: opportunity.assisted,
+  };
+  record(w, 'behavior-noticed', {
+    subject: opportunity.id,
+    activity: opportunity.activity,
+    affordance: opportunity.affordance,
+    phase: 'notice',
+    assisted: opportunity.assisted,
+  });
+  return true;
+}
+
 export function chooseActivity(w: World) {
- const c=w.creature, roll=random(w); w.explorationTarget=undefined;
- if(roll < c.temperament.restfulness){c.activity='rest'; c.target={...SHELTER}; c.remaining=12+random(w)*14}
- else if(roll < c.temperament.restfulness+(1-c.temperament.restfulness)*(.25+c.temperament.curiosity*.45)){ c.activity='explore'; const weights=w.objects.map(o=>1/(1+o.visits)); let n=random(w)*weights.reduce((a,b)=>a+b,0); let index=0; for(;index<weights.length-1;index++){n-=weights[index];if(n<=0)break} const o=w.objects[index]; c.target=approach(o.position);w.explorationTarget=o.id;c.remaining=7+random(w)*7 }
- else if(roll < 0.9){c.activity='wander';c.target=destination(w);c.remaining=5+random(w)*6}
- else {c.activity='idle';c.target={...c.position};c.remaining=4+random(w)*6}
- record(w,'activity',c.activity);
+  if (w.creature.intent) return;
+  beginIntent(w, selectOpportunity(w));
+}
+
+export function invitationOpportunity(w: World, target: Point): Opportunity {
+  return {
+    id: 'player-invitation',
+    activity: 'explore',
+    affordance: 'investigate',
+    position: target,
+    score: 1,
+    assisted: true,
+  };
 }

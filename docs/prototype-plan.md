@@ -37,3 +37,7 @@ Full V1 product, procedural anatomy, metamorphosis, aquatic evolution, continuou
 ## Refinement pass completed
 
 The supplied habitat and earlier creature study have now been reviewed in chat. The renderer was refined with original pixel clusters, a rooted arch, warm clearing, shallow sandy pond, and a simpler juvenile / resting pose. Pointer and touch object dragging, assisted collision-safe placement, safe object investigation retargeting, tap acknowledgment, petting with optional acceptance, keyboard placement, and button alternatives are implemented. Curiosity now influences exploration and invitations. Nine tests plus desktop / mobile browser checks validate this pass. Food, multiple object uses, learned preferences, and memories UI remain future work.
+
+## Behavioral Intelligence 02 completed
+
+The next increment adds persisted multi-phase intentions, semantic habitat opportunities, normalized relative preferences, decaying habituation, slowly learned feeding and grooming independence, separate deterministic random streams, long-term evidence, and version-one save migration. Invitations wait for a decision boundary and remain voluntary. The developer inspector exposes this behavior without adding player-facing meters. See [behavioral-intelligence-02.md](behavioral-intelligence-02.md) for the model and deliberate limits.

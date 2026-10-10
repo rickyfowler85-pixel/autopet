@@ -1,4 +1,6 @@
+import { recordSocialReaction } from './learning';
 import { type Point, type World, validPosition, record, random } from './model';
+import { retargetOpportunity } from './simulation';
 
 export type ReactionKind = 'acknowledge' | 'pet' | 'sleepy';
 export interface Reaction { kind: ReactionKind; until: number }
@@ -25,16 +27,18 @@ export function placement(w: World, id: string, p: Point): Point {
 }
 export function moveObject(w: World, id: string, p: Point): boolean {
  const o=w.objects.find(o=>o.id===id);if(!o)return false;
- o.position=placement(w,id,p);record(w,'object-moved',o.kind);
- if(w.explorationTarget===id){w.creature.target=approach(o.position);}
+ o.position=placement(w,id,p);
+ const meaningfulMove=o.lastMovedAt!==w.time;o.lastMovedAt=w.time;
+ if(meaningfulMove)record(w,'object-moved',o.kind);
+ retargetOpportunity(w,id,o.position);
  return true;
 }
-export function approach(p: Point): Point {const options=[{x:p.x-18,y:p.y+8},{x:p.x+18,y:p.y+8},{x:p.x,y:p.y+18},{x:p.x,y:p.y-15}];return options.find(validPosition)??{...p}}
 export function greet(w: World, pet: boolean, now: number): Reaction {
- const sleepy=w.creature.activity==='rest' && Math.hypot(w.creature.target.x-w.creature.position.x,w.creature.target.y-w.creature.position.y)<1;
- const accepts=!sleepy && (!pet||random(w)<0.5+w.creature.temperament.sociability*.5);
+ const sleepy=w.creature.activity==='rest' && w.creature.intent!==undefined && !['notice','approach'].includes(w.creature.intent.phase) && Math.hypot(w.creature.target.x-w.creature.position.x,w.creature.target.y-w.creature.position.y)<1;
+ const accepts=!sleepy && (!pet||random(w,'social')<0.5+w.creature.temperament.sociability*.5);
  const kind=sleepy?'sleepy':pet&&accepts?'pet':'acknowledge';
  record(w,pet?(accepts?'pet-accepted':'pet-deferred'):'acknowledged');
+ recordSocialReaction(w,pet?(accepts?'pet-accepted':'pet-deferred'):'acknowledgment');
  // Acknowledgment never cancels an autonomous activity or redirects the creature.
  return {kind,until:now+(pet?2.2:1.5)};
 }

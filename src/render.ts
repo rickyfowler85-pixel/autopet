@@ -52,10 +52,16 @@ export class Renderer {
  else if(o.kind==='stone')rock(c,x,y-3,9,6);
  else{ellipse(c,x,y-4,6,6,'#745332');ellipse(c,x-1,y-5,4,4,'#b08a4e');line(c,x,y-10,x,y,1,'#d4af66');for(let i=0;i<6;i++)rect(c,x-4+(i*3)%9,y-8+(i*5)%8,2,1,'#8e673b')}
  }
- private creature(c:CanvasRenderingContext2D,w:World,t:number,view:InteractionView){const a=w.creature;const moving=Math.hypot(a.target.x-a.position.x,a.target.y-a.position.y)>.8,resting=a.activity==='rest'&&!moving;
+ private creature(c:CanvasRenderingContext2D,w:World,t:number,view:InteractionView){const a=w.creature;const moving=Math.hypot(a.target.x-a.position.x,a.target.y-a.position.y)>.8,resting=a.activity==='rest'&&!moving&&a.intent!==undefined&&a.intent.phase!=='notice'&&a.intent.phase!=='approach';
  const reaction=view.reaction&&view.reaction.until>t?view.reaction.kind:undefined;const pet= reaction==='pet';
  const bob=moving?Math.round(Math.sin(t*9)):Math.round(Math.sin(t*2)*.5);ellipse(c,a.position.x,a.position.y+1,14,3,'#9b895b');paintAsset(c,resting?sleeping:juvenile,a.position.x,a.position.y+(pet?-1:bob),a.facing>0,pet||t%5>4.8,moving?t*9:0);
  if(resting){const x=a.position.x+15,y=a.position.y-16-Math.floor(t%3);rect(c,x,y,3,1,'#dfdfbd');rect(c,x+2,y+1,1,1,'#dfdfbd');rect(c,x,y+2,3,1,'#dfdfbd')}
+ const attempting=a.intent?.phase==='attempt',front=a.position.x+(a.facing>0?17:-17);
+ if(attempting&&a.activity==='forage'){rect(c,front,a.position.y-3,3,1,'#566f42');rect(c,front+(a.facing>0?3:-1),a.position.y-5,2,2,'#91a65a')}
+ if(attempting&&a.activity==='groom'){rect(c,a.position.x+10,a.position.y-22,1,5,'#eee2ae');rect(c,a.position.x+8,a.position.y-20,5,1,'#eee2ae')}
+ if(attempting&&a.activity==='wade'){for(let i=0;i<8;i++){const angle=i/8*Math.PI*2;rect(c,a.position.x+Math.cos(angle)*(11+t%2),a.position.y+Math.sin(angle)*3,1,1,'#b8d3bd')}}
+ if(attempting&&a.activity==='explore'){rect(c,front,a.position.y-13,2,2,'#eee2ae');rect(c,front+(a.facing>0?-1:1),a.position.y-16,1,2,'#eee2ae')}
+ if(attempting&&a.activity==='play'){rect(c,a.position.x-17,a.position.y-17,3,1,'#eee2ae');rect(c,a.position.x+15,a.position.y-20,3,1,'#eee2ae')}
  if(reaction&&!resting){const x=a.position.x,y=a.position.y-28-Math.floor(t%1*2);if(pet){rect(c,x-3,y,2,2,'#daaa92');rect(c,x+1,y,2,2,'#daaa92');rect(c,x-2,y+2,4,1,'#daaa92');rect(c,x-1,y+3,2,1,'#daaa92')}else{rect(c,x,y,1,3,'#f5e6ac');rect(c,x,y+4,1,1,'#f5e6ac')}}
  }
 }
