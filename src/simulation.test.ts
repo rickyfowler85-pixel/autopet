@@ -3,10 +3,30 @@ import assert from 'node:assert/strict';
 import { availableOpportunities, beginIntent, invitationOpportunity, lineClear, planRoute } from './behavior';
 import { greet, moveObject, placement, validPlacement } from './interaction';
 import { assistCare, completeLearning, habituationLevel, preferenceTotal } from './learning';
-import { ACTIVITIES, createWorld, STEP, validPosition, type Activity, type World } from './model';
+import {
+  ACTIVITIES,
+  createWorld,
+  STEP,
+  validPosition,
+  type Activity,
+  type Affordance,
+  type AnatomyParameters,
+  type Point,
+  type World,
+} from './model';
 import { recentEvidence } from './evidence';
 import { decode, load, STORAGE_KEY } from './persistence';
 import { advance, advanceOffline, interact, step } from './simulation';
+import {
+  ANATOMY_BOUNDS,
+  ANATOMY_PARAMETER_KEYS,
+  BASELINE_ANATOMY_PARAMETERS,
+  anatomyParametersCompatible,
+  createAnatomy,
+  updateAnatomy,
+  validAnatomyParameters,
+} from './anatomy';
+import { anatomyVisualKey, rasterizeCreature, type CreatureRaster } from './assets';
 
 function advanceUntil(w: World, predicate: () => boolean, limitSeconds = 180) {
   const limit = Math.floor(limitSeconds / STEP);
@@ -25,6 +45,132 @@ function assertPreferenceSimplex(w: World) {
   assert.ok(Math.abs(preferenceTotal(objects) - 1) < 1e-9);
   assert.ok(Object.values(activities).every(value => value >= 0.035 - 1e-9 && value <= 0.48 + 1e-9));
   assert.ok(Object.values(objects).every(value => value >= 0.12 - 1e-9 && value <= 0.65 + 1e-9));
+}
+
+const DAY_SECONDS = 86_400;
+
+interface LifestyleExposure {
+  activity: Activity;
+  affordance: Affordance;
+  opportunityId: string;
+  position: Point;
+  attempts: number;
+}
+
+const MOBILITY_LIFESTYLE: LifestyleExposure[] = [
+  { activity: 'explore', affordance: 'investigate', opportunityId: 'fallen-branch', position: { x: 147, y: 213 }, attempts: 150 },
+  { activity: 'wander', affordance: 'roam', opportunityId: 'open-clearing', position: { x: 202, y: 194 }, attempts: 75 },
+  { activity: 'play', affordance: 'play', opportunityId: 'open-clearing', position: { x: 202, y: 194 }, attempts: 100 },
+];
+
+const AQUATIC_LIFESTYLE: LifestyleExposure[] = [
+  { activity: 'wade', affordance: 'wade', opportunityId: 'shallow-pool', position: { x: 270, y: 184 }, attempts: 100 },
+];
+
+const GROUND_FORAGING_LIFESTYLE: LifestyleExposure[] = [
+  { activity: 'forage', affordance: 'forage', opportunityId: 'north-vegetation', position: { x: 180, y: 146 }, attempts: 25 },
+  { activity: 'rest', affordance: 'rest', opportunityId: 'root-shelter', position: { x: 86, y: 167 }, attempts: 40 },
+];
+
+function developLifestyle(w: World, days: number, lifestyle: LifestyleExposure[]) {
+  let day = Math.floor(w.time / DAY_SECONDS);
+  for (let elapsed = 0; elapsed < days; elapsed++) {
+    day++;
+    w.tick = day * DAY_SECONDS / STEP;
+    w.time = w.tick * STEP;
+    for (const exposure of lifestyle) {
+      for (let attempt = 0; attempt < exposure.attempts; attempt++) {
+        completeLearning(
+          w,
+          exposure.activity,
+          exposure.affordance,
+          exposure.opportunityId,
+          (attempt + day) % 5 === 0 ? 'partial' : 'success',
+          false,
+          30,
+          exposure.position,
+        );
+      }
+    }
+  }
+  updateAnatomy(w);
+  return w;
+}
+
+function normalizedAnatomyDistance(a: AnatomyParameters, b: AnatomyParameters): number {
+  const squared = ANATOMY_PARAMETER_KEYS.reduce((sum, key) => {
+    const bound = ANATOMY_BOUNDS[key];
+    return sum + ((a[key] - b[key]) / (bound.maximum - bound.minimum)) ** 2;
+  }, 0);
+  return Math.sqrt(squared / ANATOMY_PARAMETER_KEYS.length);
+}
+
+function targetGap(w: World): number {
+  return normalizedAnatomyDistance(w.creature.anatomy.current, w.creature.anatomy.target);
+}
+
+function assertValidAnatomy(parameters: AnatomyParameters) {
+  assert.equal(validAnatomyParameters(parameters), true);
+  assert.equal(anatomyParametersCompatible(parameters), true);
+  for (const key of ANATOMY_PARAMETER_KEYS) {
+    assert.ok(Number.isFinite(parameters[key]), `${key} must remain finite`);
+    assert.ok(parameters[key] >= ANATOMY_BOUNDS[key].minimum - 1e-9, `${key} fell below its bound`);
+    assert.ok(parameters[key] <= ANATOMY_BOUNDS[key].maximum + 1e-9, `${key} exceeded its bound`);
+  }
+  assert.ok(parameters.limbBuild + 1e-6 >= 0.93 + 0.65 * (parameters.bodyDepth - 0.9));
+  assert.ok(parameters.limbLength + 1e-6 >= 0.9 + 0.45 * (parameters.bodyLength - 0.9));
+  assert.ok(parameters.tailDepth + 1e-6 >= 0.88 + 0.45 * (parameters.bodyDepth - 0.9));
+}
+
+function occupiedPixels(raster: CreatureRaster): Set<string> {
+  const pixels = new Set<string>();
+  raster.rows.forEach((row, y) => [...row].forEach((pixel, x) => {
+    if (pixel !== ' ') pixels.add(`${x},${y}`);
+  }));
+  return pixels;
+}
+
+function assertConnectedSilhouette(raster: CreatureRaster) {
+  const occupied = occupiedPixels(raster);
+  const first = occupied.values().next().value as string | undefined;
+  assert.ok(first);
+  const pending = [first];
+  const visited = new Set(pending);
+  while (pending.length) {
+    const [x, y] = pending.shift()!.split(',').map(Number);
+    for (const [dx, dy] of [[1, 0], [-1, 0], [0, 1], [0, -1]]) {
+      const neighbor = `${x + dx},${y + dy}`;
+      if (occupied.has(neighbor) && !visited.has(neighbor)) {
+        visited.add(neighbor);
+        pending.push(neighbor);
+      }
+    }
+  }
+  assert.equal(visited.size, occupied.size, 'the authored body plan must remain one connected silhouette');
+}
+
+function silhouetteSimilarity(left: CreatureRaster, right: CreatureRaster): number {
+  const leftPixels = occupiedPixels(left);
+  const rightPixels = occupiedPixels(right);
+  let intersection = 0;
+  for (const pixel of leftPixels) if (rightPixels.has(pixel)) intersection++;
+  return intersection / (leftPixels.size + rightPixels.size - intersection);
+}
+
+let cachedAnatomyHistories: Record<'mobility' | 'aquatic' | 'ground', World> | undefined;
+function anatomyHistories(): Record<'mobility' | 'aquatic' | 'ground', World> {
+  if (cachedAnatomyHistories) return cachedAnatomyHistories;
+  const build = (lifestyle: LifestyleExposure[]) => {
+    const w = createWorld(601);
+    w.lastSaved = 0;
+    return developLifestyle(w, 30, lifestyle);
+  };
+  cachedAnatomyHistories = {
+    mobility: build(MOBILITY_LIFESTYLE),
+    aquatic: build(AQUATIC_LIFESTYLE),
+    ground: build(GROUND_FORAGING_LIFESTYLE),
+  };
+  return cachedAnatomyHistories;
 }
 
 type CarePattern = 'feeding' | 'grooming' | 'balanced';
@@ -360,6 +506,146 @@ test('rolling evidence retains compact 7- and 30-day developmental windows', () 
   assert.equal(decode(JSON.stringify(malformed)), null);
 });
 
+test('identical recorded 30-day lifestyles produce identical anatomy', () => {
+  const first = anatomyHistories().mobility;
+  const second = createWorld(601);
+  second.lastSaved = 0;
+  developLifestyle(second, 30, MOBILITY_LIFESTYLE);
+
+  assert.deepEqual(second.creature.anatomy, first.creature.anatomy);
+  assert.deepEqual(first.creature.anatomy.baseline, BASELINE_ANATOMY_PARAMETERS);
+  assert.ok(first.development.evidence.activities.explore.attempts > 0);
+  assert.ok(first.development.evidence.activities.wander.attempts > 0);
+  assert.ok(first.development.evidence.activities.play.attempts > 0);
+});
+
+test('contrasting recorded lifestyles produce distinct, plausible 30-day bodies', () => {
+  const { mobility, aquatic, ground } = anatomyHistories();
+  const active = mobility.creature.anatomy;
+  const water = aquatic.creature.anatomy;
+  const forager = ground.creature.anatomy;
+
+  for (const anatomy of [active, water, forager]) {
+    assertValidAnatomy(anatomy.current);
+    assertValidAnatomy(anatomy.target);
+    assert.ok(normalizedAnatomyDistance(anatomy.current, anatomy.target) < 0.03,
+      'a sustained month should approach its bounded target');
+  }
+
+  assert.ok(normalizedAnatomyDistance(active.current, water.current) > 0.18);
+  assert.ok(normalizedAnatomyDistance(active.current, forager.current) > 0.22);
+  assert.ok(normalizedAnatomyDistance(water.current, forager.current) > 0.22);
+
+  assert.ok(active.pressures.mobility > water.pressures.mobility + 0.25);
+  assert.ok(water.pressures.aquatic > active.pressures.aquatic + 0.35);
+  assert.ok(forager.pressures.groundForaging > active.pressures.groundForaging + 0.35);
+  assert.ok(active.current.limbLength > water.current.limbLength + 0.08);
+  assert.ok(active.current.posture > forager.current.posture + 0.1);
+  assert.ok(water.current.tailDepth > active.current.tailDepth + 0.06);
+  assert.ok(water.current.coatHue > forager.current.coatHue + 0.1);
+  assert.ok(forager.current.bodyDepth > active.current.bodyDepth + 0.08);
+  assert.ok(forager.current.limbBuild > active.current.limbBuild + 0.1);
+});
+
+test('procedural pixels preserve the juvenile body plan across developed forms and poses', () => {
+  const { mobility, aquatic, ground } = anatomyHistories();
+  const forms = [
+    createWorld(601).creature.anatomy.current,
+    mobility.creature.anatomy.current,
+    aquatic.creature.anatomy.current,
+    ground.creature.anatomy.current,
+  ];
+  const standRasters = forms.map(anatomy => rasterizeCreature(anatomy, 'stand', 0, false));
+  assert.equal(new Set(standRasters.map(raster => raster.visualKey)).size, forms.length);
+
+  for (const anatomy of forms) {
+    for (const pose of ['stand', 'sleep'] as const) {
+      const raster = rasterizeCreature(anatomy, pose, 0, false);
+      const repeated = rasterizeCreature(structuredClone(anatomy), pose, 0, false);
+      assert.equal(repeated.visualKey, raster.visualKey);
+      assert.deepEqual(repeated.rows, raster.rows);
+      assert.deepEqual(repeated.palette, raster.palette);
+      assert.equal(raster.rows.length, raster.height);
+      assert.ok(raster.rows.every(row => row.length === raster.width));
+      assert.ok(raster.partRows.every(row => row.length === raster.width));
+      assert.ok(raster.metrics.bounds.right - raster.metrics.bounds.left + 1 <= 38);
+      assert.ok(raster.metrics.bounds.bottom - raster.metrics.bounds.top + 1 <= 27);
+      assert.ok(occupiedPixels(raster).size >= 300 && occupiedPixels(raster).size <= 650);
+      assertConnectedSilhouette(raster);
+      const pixels = raster.rows.join('');
+      assert.ok([...pixels].every(pixel => pixel === ' ' || Object.hasOwn(raster.palette, pixel)));
+      const parts = raster.partRows.join('');
+      for (const part of ['1', '2', '3', '4', '5', '6', 'a', 'z', 't', 'r']) {
+        assert.ok(parts.includes(part), `${pose} raster lost semantic part ${part}`);
+      }
+    }
+  }
+
+  for (let index = 1; index < standRasters.length; index++) {
+    assert.ok(silhouetteSimilarity(standRasters[0], standRasters[index]) >= 0.7,
+      'development must read as the same juvenile body plan');
+  }
+});
+
+test('saved anatomy restores its exact procedural pixels and future development', () => {
+  const original = structuredClone(anatomyHistories().aquatic);
+  assert.ok(targetGap(original) > 0);
+  const before = (['stand', 'sleep'] as const).map(pose => {
+    const raster = rasterizeCreature(original.creature.anatomy.current, pose, 0, false);
+    return { visualKey: raster.visualKey, rows: raster.rows, palette: raster.palette };
+  });
+  const restored = decode(JSON.stringify(original));
+  assert.ok(restored);
+  assert.deepEqual(restored.creature.anatomy, original.creature.anatomy);
+  for (const [index, pose] of (['stand', 'sleep'] as const).entries()) {
+    const raster = rasterizeCreature(restored.creature.anatomy.current, pose, 0, false);
+    assert.deepEqual({ visualKey: raster.visualKey, rows: raster.rows, palette: raster.palette }, before[index]);
+  }
+
+  developLifestyle(original, 1, AQUATIC_LIFESTYLE);
+  developLifestyle(restored, 1, AQUATIC_LIFESTYLE);
+  assert.deepEqual(restored, original);
+});
+
+test('anatomy stabilizes inside its bounds under sustained developmental pressure', () => {
+  const stable = structuredClone(anatomyHistories().mobility);
+  const targetAtThirtyDays = structuredClone(stable.creature.anatomy.target);
+  const gapAtThirtyDays = targetGap(stable);
+  developLifestyle(stable, 30, MOBILITY_LIFESTYLE);
+
+  assert.deepEqual(stable.creature.anatomy.target, targetAtThirtyDays);
+  assert.ok(targetGap(stable) < gapAtThirtyDays / 20);
+  assertValidAnatomy(stable.creature.anatomy.current);
+  assertValidAnatomy(stable.creature.anatomy.target);
+  assert.ok(stable.development.evidence.rolling.days.length <= 30);
+});
+
+test('visible development can reverse direction after a sustained lifestyle change', () => {
+  const w = structuredClone(anatomyHistories().mobility);
+  const firstMobilityBody = structuredClone(w.creature.anatomy.current);
+  const mobilityTarget = structuredClone(w.creature.anatomy.target);
+  const firstVisual = anatomyVisualKey(firstMobilityBody);
+
+  developLifestyle(w, 30, GROUND_FORAGING_LIFESTYLE);
+  const groundBody = structuredClone(w.creature.anatomy.current);
+  assert.ok(groundBody.bodyDepth > firstMobilityBody.bodyDepth + 0.07);
+  assert.ok(groundBody.limbBuild > firstMobilityBody.limbBuild + 0.1);
+  assert.ok(groundBody.posture < firstMobilityBody.posture - 0.1);
+  assert.ok(groundBody.tailLength < firstMobilityBody.tailLength - 0.1);
+  const groundVisual = anatomyVisualKey(groundBody);
+  assert.notEqual(groundVisual, firstVisual);
+
+  developLifestyle(w, 30, MOBILITY_LIFESTYLE);
+  const returnedBody = w.creature.anatomy.current;
+  assert.deepEqual(w.creature.anatomy.target, mobilityTarget);
+  assert.ok(returnedBody.bodyDepth < groundBody.bodyDepth - 0.07);
+  assert.ok(returnedBody.limbBuild < groundBody.limbBuild - 0.09);
+  assert.ok(returnedBody.posture > groundBody.posture + 0.1);
+  assert.ok(returnedBody.tailLength > groundBody.tailLength + 0.1);
+  assert.notEqual(anatomyVisualKey(returnedBody), groundVisual);
+  assertValidAnatomy(returnedBody);
+});
+
 test('long-term autonomous behavior remains calm, varied, and bounded', () => {
   const histories = longTermHistories();
   const profiles = new Set<string>();
@@ -473,7 +759,7 @@ test('version-one saves migrate facts without inventing outcomes; malformed save
   };
   const migrated = decode(JSON.stringify(legacy));
   assert.ok(migrated);
-  assert.equal(migrated.version, 3);
+  assert.equal(migrated.version, 4);
   assert.equal(migrated.objects[0].visits, 7);
   assert.equal(migrated.development.observations, 15);
   assert.equal(migrated.development.evidence.outcomes.length, 0);
@@ -490,6 +776,9 @@ test('version-one saves migrate facts without inventing outcomes; malformed save
   completeLearning(oldV2World, 'forage', 'forage', 'player-feeding-assistance', 'success', true, 4);
   const oldV2 = JSON.parse(JSON.stringify(oldV2World));
   oldV2.version = 2;
+  oldV2.creature.anatomy = {
+    stage: 'juvenile', sprite: 'juvenile-placeholder', traits: { ears: 2, tail: 1, coat: 'slate' },
+  };
   delete oldV2.development.evidence.rolling;
   oldV2.creature.learning.independence.feeding.assisted = 1;
   for (const domain of ['feeding', 'grooming']) {
@@ -500,7 +789,7 @@ test('version-one saves migrate facts without inventing outcomes; malformed save
   for (const outcome of oldV2.development.evidence.outcomes) delete outcome.assistanceSource;
   const migratedV2 = decode(JSON.stringify(oldV2));
   assert.ok(migratedV2);
-  assert.equal(migratedV2.version, 3);
+  assert.equal(migratedV2.version, 4);
   assert.equal(migratedV2.development.evidence.activities.forage.attempts, 1);
   assert.equal(migratedV2.development.evidence.outcomes[0].assistanceSource, 'player-feeding');
   assert.equal(migratedV2.development.evidence.rolling.coverageStartedAt, migratedV2.time);
@@ -522,6 +811,38 @@ test('version-one saves migrate facts without inventing outcomes; malformed save
     assisted: false,
   });
   assert.equal(decode(JSON.stringify(fabricatedEvidence)), null);
+});
+
+test('Behavioral Refinement V3 saves migrate to neutral anatomy without changing recorded history', () => {
+  const source = createWorld(317);
+  source.lastSaved = 123_456;
+  advance(source, 600);
+  const legacy = JSON.parse(JSON.stringify(source));
+  legacy.version = 3;
+  legacy.creature.anatomy = {
+    stage: 'juvenile',
+    sprite: 'juvenile-placeholder',
+    traits: { ears: 2, tail: 1, coat: 'slate' },
+  };
+
+  const expected = structuredClone(legacy);
+  expected.version = 4;
+  expected.creature.anatomy = createAnatomy(source.time);
+  const migrated = decode(JSON.stringify(legacy));
+  assert.deepEqual(migrated, expected);
+
+  const wrongLegacyShape = structuredClone(legacy);
+  wrongLegacyShape.creature.anatomy.traits.tail = 2;
+  assert.equal(decode(JSON.stringify(wrongLegacyShape)), null);
+
+  const invalidBound = JSON.parse(JSON.stringify(source));
+  invalidBound.creature.anatomy.current.bodyLength = 20;
+  assert.equal(decode(JSON.stringify(invalidBound)), null);
+
+  const incompatible = JSON.parse(JSON.stringify(source));
+  incompatible.creature.anatomy.current.bodyDepth = 1.12;
+  incompatible.creature.anatomy.current.limbBuild = 0.9;
+  assert.equal(decode(JSON.stringify(incompatible)), null);
 });
 
 test('drag placement still projects pond, shelter, and overlaps onto valid ground', () => {

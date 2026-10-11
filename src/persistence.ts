@@ -22,6 +22,7 @@ import {
   type World,
   validPosition,
 } from './model';
+import { createAnatomy, validAnatomy } from './anatomy';
 import { beginRollingCoverage } from './evidence';
 import { advanceOffline } from './simulation';
 import { planRoute } from './behavior';
@@ -46,6 +47,10 @@ const SKILL_COUNT_KEYS = [
   'helpAccepted',
   'helpDeclined',
 ] as const;
+const ANATOMY_KEYS = ['stage', 'sprite', 'baseline', 'current', 'target', 'pressures', 'lastUpdatedAt'] as const;
+const LEGACY_ANATOMY_KEYS = ['stage', 'sprite', 'traits'] as const;
+const LEGACY_TRAIT_KEYS = ['ears', 'tail', 'coat'] as const;
+const PROCEDURAL_SPRITE = createAnatomy(0).sprite;
 
 function finite(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value);
@@ -57,6 +62,40 @@ function count(value: unknown): value is number {
 
 function unit(value: unknown): value is number {
   return finite(value) && value >= 0 && value <= 1;
+}
+
+function exactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
+  const actual = Object.keys(value);
+  return actual.length === keys.length && keys.every(key => Object.hasOwn(value, key));
+}
+
+function anatomy(value: unknown, worldTime: number): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  return exactKeys(candidate, ANATOMY_KEYS)
+    && candidate.sprite === PROCEDURAL_SPRITE
+    && finite(candidate.lastUpdatedAt)
+    && candidate.lastUpdatedAt >= 0
+    && candidate.lastUpdatedAt <= worldTime
+    && validAnatomy(candidate, worldTime);
+}
+
+function legacyAnatomy(value: unknown): boolean {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+  const candidate = value as Record<string, unknown>;
+  if (!exactKeys(candidate, LEGACY_ANATOMY_KEYS)
+    || candidate.stage !== 'juvenile'
+    || candidate.sprite !== 'juvenile-placeholder'
+    || !candidate.traits
+    || typeof candidate.traits !== 'object'
+    || Array.isArray(candidate.traits)) {
+    return false;
+  }
+  const traits = candidate.traits as Record<string, unknown>;
+  return exactKeys(traits, LEGACY_TRAIT_KEYS)
+    && traits.ears === 2
+    && traits.tail === 1
+    && traits.coat === 'slate';
 }
 
 function point(value: unknown): value is { x: number; y: number } {
@@ -251,10 +290,10 @@ function validEvidence(w: World): boolean {
   return true;
 }
 
-function validV3(value: unknown): value is World {
+function validV4(value: unknown): value is World {
   if (!value || typeof value !== 'object') return false;
   const w = value as World;
-  if (w.version !== 3
+  if (w.version !== 4
     || !count(w.identitySeed) || w.identitySeed <= 0
     || !count(w.seed) || w.seed <= 0
     || !count(w.outcomeSeed) || w.outcomeSeed <= 0
@@ -270,7 +309,7 @@ function validV3(value: unknown): value is World {
   if (!creature || !point(creature.position) || !point(creature.target)
     || !activity(creature.activity)
     || !finite(creature.facing) || !finite(creature.remaining) || !finite(creature.distance) || creature.distance < 0
-    || creature.anatomy?.stage !== 'juvenile'
+    || !anatomy(creature.anatomy, w.time)
     || !creature.temperament || !creature.internal || !creature.learning) {
     return false;
   }
@@ -338,6 +377,18 @@ function validV3(value: unknown): value is World {
   return true;
 }
 
+function migrateV3(value: Record<string, unknown>): World | null {
+  if (value.version !== 3) return null;
+  const migrated = structuredClone(value) as Record<string, unknown>;
+  const creature = migrated.creature as Record<string, unknown> | undefined;
+  if (!creature || !legacyAnatomy(creature.anatomy)) return null;
+
+  const worldTime = finite(migrated.time) ? Math.max(0, migrated.time) : 0;
+  creature.anatomy = createAnatomy(worldTime);
+  migrated.version = 4;
+  return validV4(migrated) ? migrated : null;
+}
+
 function inferLegacyAssistance(opportunityId: string, assisted: boolean): AssistanceSource | undefined {
   if (!assisted) return undefined;
   if (opportunityId === 'player-feeding-assistance') return 'player-feeding';
@@ -401,7 +452,7 @@ function migrateV2(value: Record<string, unknown>): World | null {
   const worldTime = finite(migrated.time) ? migrated.time : 0;
   evidence.rolling = { coverageStartedAt: Math.max(0, worldTime), days: [] };
   migrated.version = 3;
-  return validV3(migrated) ? migrated : null;
+  return migrateV3(migrated);
 }
 
 function migrateV1(legacy: Record<string, unknown>): World | null {
@@ -419,6 +470,7 @@ function migrateV1(legacy: Record<string, unknown>): World | null {
   w.socialSeed = ((w.seed ^ 0x85ebca6b) >>> 0) || 1;
   w.tick = legacy.tick as number;
   w.time = w.tick * STEP;
+  w.creature.anatomy = createAnatomy(w.time);
   w.lastSaved = legacy.lastSaved as number;
   w.creature.position = { ...oldCreature.position as { x: number; y: number } };
   w.creature.target = { ...oldCreature.target as { x: number; y: number } };
@@ -477,7 +529,7 @@ function migrateV1(legacy: Record<string, unknown>): World | null {
     }
   }
   beginRollingCoverage(w.development.evidence, w.time);
-  return validV3(w) ? w : null;
+  return validV4(w) ? w : null;
 }
 
 export function decode(raw: string): World | null {
@@ -487,7 +539,8 @@ export function decode(raw: string): World | null {
     const version = (parsed as { version?: unknown }).version;
     if (version === 1) return migrateV1(parsed as Record<string, unknown>);
     if (version === 2) return migrateV2(parsed as Record<string, unknown>);
-    return validV3(parsed) ? parsed : null;
+    if (version === 3) return migrateV3(parsed as Record<string, unknown>);
+    return validV4(parsed) ? parsed : null;
   } catch {
     return null;
   }
@@ -513,6 +566,7 @@ export function load(): { world: World; offline: number; available: boolean; cap
 export function save(w: World): boolean {
   try {
     w.lastSaved = Date.now();
+    if (!validV4(w)) return false;
     localStorage.setItem(STORAGE_KEY, JSON.stringify(w));
     return true;
   } catch {

@@ -12,7 +12,9 @@ export interface InteractionView {
   selected?: string;
 }
 export function hitCreature(w: World, p: Point): boolean {
-  return Math.abs(p.x-w.creature.position.x)<19 && p.y>w.creature.position.y-25 && p.y<w.creature.position.y+7;
+  // Covers the complete constrained anatomy envelope, including the tallest
+  // ears and longest tail, while remaining a compact interaction target.
+  return Math.abs(p.x-w.creature.position.x)<23 && p.y>w.creature.position.y-30 && p.y<w.creature.position.y+7;
 }
 export function hitObject(w: World, p: Point): string | undefined {
   return [...w.objects].sort((a,b)=>b.position.y-a.position.y).find(o=>Math.abs(o.position.x-p.x)<15 && Math.abs(o.position.y-4-p.y)<12)?.id;

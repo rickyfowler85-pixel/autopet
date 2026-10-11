@@ -17,6 +17,7 @@ import {
   recordInvitationEvidence,
   recordSocialReactionEvidence,
 } from './evidence';
+import { advanceAnatomy, refreshAnatomyTarget } from './anatomy';
 
 const HABITUATION_HALF_LIFE = 900;
 
@@ -151,6 +152,10 @@ export function completeLearning(
   const expectedQuality = priorActivity.attempts > 4
     ? (priorActivity.successes + priorActivity.partials * 0.5) / priorActivity.attempts
     : 0.65;
+  // Physical development follows simulation time and the previously persisted
+  // target. The new outcome can only influence the next target, never rewrite
+  // the body retroactively.
+  advanceAnatomy(w.creature.anatomy, w.time);
   recordDevelopmentOutcome(w, {
     activity,
     affordance,
@@ -161,6 +166,7 @@ export function completeLearning(
     position,
     assistanceSource,
   });
+  refreshAnatomyTarget(w);
 
   const quality = outcome === 'success' ? 1 : outcome === 'partial' ? 0.5 : 0;
   const signal = quality - expectedQuality;

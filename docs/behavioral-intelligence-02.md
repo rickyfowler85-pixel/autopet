@@ -1,5 +1,7 @@
 # Behavioral Intelligence 02
 
+> Historical implementation note for Prototype 02. The current version extends this foundation with [Procedural Anatomy 01](./procedural-anatomy-01.md).
+
 This increment preserves the Vite, TypeScript, Canvas renderer, habitat composition, art, interaction surface, and passive-first philosophy. It replaces flat activity rolls with deterministic intentions and durable learning.
 
 ## Decision model
