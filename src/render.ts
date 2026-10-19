@@ -1,5 +1,5 @@
 import { type World, type HabitatObject } from './model';
-import { juvenile, sleeping, paintAsset } from './assets';
+import { paintCreature, rasterizeCreature, type CreaturePose } from './assets';
 import { type InteractionView } from './interaction';
 export const WIDTH=400,HEIGHT=280;
 const C={ink:'#263f3b',leaf:'#3e6046',dark:'#233e38',moss:'#6b824b',grass:'#90955a',light:'#bac177',soil:'#c4aa75',root:'#856744',water:'#639f9c'};
@@ -53,18 +53,22 @@ export class Renderer {
  else{ellipse(c,x,y-4,6,6,'#745332');ellipse(c,x-1,y-5,4,4,'#b08a4e');line(c,x,y-10,x,y,1,'#d4af66');for(let i=0;i<6;i++)rect(c,x-4+(i*3)%9,y-8+(i*5)%8,2,1,'#8e673b')}
  }
  private creature(c:CanvasRenderingContext2D,w:World,t:number,view:InteractionView){const a=w.creature;const moving=Math.hypot(a.target.x-a.position.x,a.target.y-a.position.y)>.8,resting=a.activity==='rest'&&!moving&&a.intent!==undefined&&a.intent.phase!=='notice'&&a.intent.phase!=='approach';
- const reaction=view.reaction&&view.reaction.until>t?view.reaction.kind:undefined;const pet= reaction==='pet';
- const bob=moving?Math.round(Math.sin(t*9)):Math.round(Math.sin(t*2)*.5);ellipse(c,a.position.x,a.position.y+1,14,3,'#9b895b');paintAsset(c,resting?sleeping:juvenile,a.position.x,a.position.y+(pet?-1:bob),a.facing>0,pet||t%5>4.8,moving?t*9:0);
- if(resting){const x=a.position.x+15,y=a.position.y-16-Math.floor(t%3);rect(c,x,y,3,1,'#dfdfbd');rect(c,x+2,y+1,1,1,'#dfdfbd');rect(c,x,y+2,3,1,'#dfdfbd')}
- const attempting=a.intent?.phase==='attempt',front=a.position.x+(a.facing>0?17:-17);
- if(a.intent?.phase==='request'){const x=a.position.x+(a.facing>0?18:-20),y=a.position.y-25-Math.floor(t%1.2);rect(c,x,y,2,2,'#f5e6ac');rect(c,x+(a.facing>0?3:-3),y-3,2,2,'#f5e6ac');rect(c,x+(a.facing>0?5:-5),y-6,1,1,'#f5e6ac')}
- if(attempting&&a.activity==='forage'){rect(c,front,a.position.y-3,3,1,'#566f42');rect(c,front+(a.facing>0?3:-1),a.position.y-5,2,2,'#91a65a')}
- if(attempting&&a.activity==='groom'){rect(c,a.position.x+10,a.position.y-22,1,5,'#eee2ae');rect(c,a.position.x+8,a.position.y-20,5,1,'#eee2ae')}
- if(attempting&&a.intent?.assistanceSource==='player-feeding'){rect(c,front+(a.facing>0?5:-5),a.position.y-1,2,1,'#d4af66');rect(c,front+(a.facing>0?8:-8),a.position.y-4,1,1,'#d4af66')}
- if(attempting&&a.intent?.assistanceSource==='player-grooming'){const sparkle=a.position.x+(Math.floor(t*3)%2?13:-13);rect(c,sparkle,a.position.y-19,1,5,'#f5e6ac');rect(c,sparkle-2,a.position.y-17,5,1,'#f5e6ac')}
- if(attempting&&a.activity==='wade'){for(let i=0;i<8;i++){const angle=i/8*Math.PI*2;rect(c,a.position.x+Math.cos(angle)*(11+t%2),a.position.y+Math.sin(angle)*3,1,1,'#b8d3bd')}}
- if(attempting&&a.activity==='explore'){rect(c,front,a.position.y-13,2,2,'#eee2ae');rect(c,front+(a.facing>0?-1:1),a.position.y-16,1,2,'#eee2ae')}
- if(attempting&&a.activity==='play'){rect(c,a.position.x-17,a.position.y-17,3,1,'#eee2ae');rect(c,a.position.x+15,a.position.y-20,3,1,'#eee2ae')}
- if(reaction&&!resting){const x=a.position.x,y=a.position.y-28-Math.floor(t%1*2);if(pet){rect(c,x-3,y,2,2,'#daaa92');rect(c,x+1,y,2,2,'#daaa92');rect(c,x-2,y+2,4,1,'#daaa92');rect(c,x-1,y+3,2,1,'#daaa92')}else{rect(c,x,y,1,3,'#f5e6ac');rect(c,x,y+4,1,1,'#f5e6ac')}}
+ const reaction=view.reaction&&view.reaction.until>t?view.reaction.kind:undefined;const pet=reaction==='pet';
+ const pose:CreaturePose=resting?'sleep':'stand',gaitFrame=moving?Math.floor(t*9)%4:0,blink=pet||t%5>4.8;
+ const bob=moving?Math.round(Math.sin(t*9)):Math.round(Math.sin(t*2)*.5),spriteY=a.position.y+(pet?-1:bob);
+ const raster=rasterizeCreature(a.anatomy.current,pose,gaitFrame,blink);ellipse(c,a.position.x,a.position.y+1,raster.metrics.shadowRadius,3,'#9b895b');
+ const metrics=paintCreature(c,a.anatomy.current,a.position.x,spriteY,{pose,facing:a.facing,blink,gaitFrame});
+ const direction=a.facing>0?1:-1,front=metrics.front.x;
+ if(resting){const x=metrics.bounds.right+2,y=metrics.bounds.top+3-Math.floor(t%3);rect(c,x,y,3,1,'#dfdfbd');rect(c,x+2,y+1,1,1,'#dfdfbd');rect(c,x,y+2,3,1,'#dfdfbd')}
+ const attempting=a.intent?.phase==='attempt';
+ if(a.intent?.phase==='request'){const x=front+direction*2,y=metrics.bounds.top-2-Math.floor(t%1.2);rect(c,x,y,2,2,'#f5e6ac');rect(c,x+direction*3,y-3,2,2,'#f5e6ac');rect(c,x+direction*5,y-6,1,1,'#f5e6ac')}
+ if(attempting&&a.activity==='forage'){rect(c,front,a.position.y-3,direction*3,1,'#566f42');rect(c,front+direction*3,a.position.y-5,2,2,'#91a65a')}
+ if(attempting&&a.activity==='groom'){rect(c,metrics.back.x+direction*5,metrics.back.y-2,1,5,'#eee2ae');rect(c,metrics.back.x+direction*3,metrics.back.y,5,1,'#eee2ae')}
+ if(attempting&&a.intent?.assistanceSource==='player-feeding'){rect(c,front+direction*5,a.position.y-1,2,1,'#d4af66');rect(c,front+direction*8,a.position.y-4,1,1,'#d4af66')}
+ if(attempting&&a.intent?.assistanceSource==='player-grooming'){const sparkle=Math.floor(t*3)%2?metrics.bounds.right:metrics.bounds.left;rect(c,sparkle,metrics.back.y,1,5,'#f5e6ac');rect(c,sparkle-2,metrics.back.y+2,5,1,'#f5e6ac')}
+ if(attempting&&a.activity==='wade'){for(let i=0;i<8;i++){const angle=i/8*Math.PI*2;rect(c,a.position.x+Math.cos(angle)*(Math.min(15,raster.metrics.shadowRadius-2)+t%2),a.position.y+Math.sin(angle)*3,1,1,'#b8d3bd')}}
+ if(attempting&&a.activity==='explore'){rect(c,front,metrics.mouth.y-3,2,2,'#eee2ae');rect(c,front-direction,metrics.mouth.y-6,1,2,'#eee2ae')}
+ if(attempting&&a.activity==='play'){rect(c,metrics.bounds.left-1,metrics.back.y,3,1,'#eee2ae');rect(c,metrics.bounds.right-1,metrics.back.y-3,3,1,'#eee2ae')}
+ if(reaction&&!resting){const x=metrics.headTop.x,y=metrics.bounds.top-4-Math.floor(t%1*2);if(pet){rect(c,x-3,y,2,2,'#daaa92');rect(c,x+1,y,2,2,'#daaa92');rect(c,x-2,y+2,4,1,'#daaa92');rect(c,x-1,y+3,2,1,'#daaa92')}else{rect(c,x,y,1,3,'#f5e6ac');rect(c,x,y+4,1,1,'#f5e6ac')}}
  }
 }

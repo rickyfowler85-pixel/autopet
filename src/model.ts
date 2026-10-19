@@ -1,3 +1,5 @@
+import { createAnatomy } from './anatomy';
+
 export interface Point { x: number; y: number }
 
 export const ACTIVITIES = ['idle', 'wander', 'rest', 'explore', 'forage', 'groom', 'wade', 'play'] as const;
@@ -13,10 +15,38 @@ export type Outcome = 'success' | 'partial' | 'deferred';
 export type CareDomain = 'feeding' | 'grooming';
 export type AssistanceSource = 'environment-arranged' | 'player-feeding' | 'player-grooming';
 
+export interface AnatomyParameters {
+  bodyLength: number;
+  bodyDepth: number;
+  limbLength: number;
+  limbBuild: number;
+  earSize: number;
+  earLift: number;
+  tailLength: number;
+  tailDepth: number;
+  posture: number;
+  coatHue: number;
+  coatLightness: number;
+  creamCoverage: number;
+}
+
+export interface AdaptationPressures {
+  mobility: number;
+  aquatic: number;
+  groundForaging: number;
+  recovery: number;
+  selfCare: number;
+  grooming: number;
+}
+
 export interface Anatomy {
   stage: 'juvenile';
   sprite: string;
-  traits: { ears: number; tail: number; coat: string };
+  baseline: AnatomyParameters;
+  current: AnatomyParameters;
+  target: AnatomyParameters;
+  pressures: AdaptationPressures;
+  lastUpdatedAt: number;
 }
 
 export interface Temperament {
@@ -204,7 +234,7 @@ export interface DevelopmentState {
 }
 
 export interface World {
-  version: 3;
+  version: 4;
   identitySeed: number;
   seed: number;
   outcomeSeed: number;
@@ -326,7 +356,7 @@ export function createWorld(seed = 42891): World {
     play: 0.07 + temperament.sociability * 0.06,
   });
   return {
-    version: 3,
+    version: 4,
     identitySeed: stableSeed,
     seed: stableSeed,
     outcomeSeed: (stableSeed ^ 0x9e3779b9) >>> 0 || 1,
@@ -341,7 +371,7 @@ export function createWorld(seed = 42891): World {
       facing: 1,
       activity: 'idle',
       remaining: 3,
-      anatomy: { stage: 'juvenile', sprite: 'juvenile-placeholder', traits: { ears: 2, tail: 1, coat: 'slate' } },
+      anatomy: createAnatomy(0),
       temperament,
       distance: 0,
       internal: { energy: 0.72, forageReadiness: 0.34, groomingReadiness: 0.28 },
