@@ -220,14 +220,14 @@ class RasterBuilder {
     for (let row = 0; row <= height; row++) {
       const t = row / height;
       const center = Math.round(tipX * (1 - t) + baseX * t);
-      const half = Math.max(0, Math.round(t * 2));
-      for (let x = center - half; x <= center + half; x++) this.set(x, baseY - height + row, row < 2 ? 's' : 'b', part);
+      const half = Math.round(t * 3);
+      for (let x = center - half; x <= center + half + (row === 0 ? 1 : 0); x++) this.set(x, baseY - height + row, 'b', part);
     }
-    const innerHeight = Math.max(2, height - 2);
+    const innerHeight = Math.max(2, height - 1);
     for (let row = 1; row < innerHeight; row++) {
       const t = row / innerHeight;
       const center = Math.round(tipX * (1 - t) + baseX * t);
-      const half = Math.max(0, Math.round(t));
+      const half = Math.max(0, Math.round(t * 2) - 1);
       for (let x = center - half; x <= center + half; x++) this.set(x, baseY - height + 1 + row, 'p', part);
     }
   }
@@ -251,11 +251,12 @@ function gaitOffset(frame: number, pair: number): number {
 }
 
 function addLeg(builder: RasterBuilder, x: number, top: number, width: number, part: string, footOffset: number) {
-  const innerWidth = width;
-  const left = x - Math.floor(innerWidth / 2);
-  builder.rect(left, top, innerWidth, Math.max(2, -3 - top), 'b', part);
-  builder.rect(left, -4 + footOffset, innerWidth, 2, 'c', part);
-  builder.rect(left - (width > 1 ? 1 : 0), -2 + footOffset, innerWidth + 1, 1, 'c', part);
+  // Rounded upper support stays substantial even on the high-clearance form.
+  const left = x - Math.floor(width / 2);
+  builder.ellipse(x, top + 1, 2, 3, 'b', part);
+  builder.rect(left, top + 1, width, Math.max(2, -3 + footOffset - top), 'b', part);
+  builder.rect(left, -3 + footOffset, width, 2, 'c', part);
+  builder.rect(left, -2 + footOffset, width + 1, 1, 'b', part);
 }
 
 interface BuildLandmarks {
@@ -269,34 +270,38 @@ interface BuildLandmarks {
 }
 
 function buildStand(builder: RasterBuilder, visual: VisualAnatomy, gaitFrame: number): BuildLandmarks {
-  const bodyRx = 10 + visual.bodyLength;
+  const bodyRx = 9 + visual.bodyLength;
   const bodyRy = 5 + visual.bodyDepth;
   const clearance = clamp(4 + visual.limbLength - visual.bodyDepth + visual.posture, 2, 7);
   const bodyBottom = -1 - clearance;
   const bodyY = bodyBottom - bodyRy;
   const bodyX = 3;
-  const headX = -8;
-  const headY = bodyY - 1 - Math.max(0, visual.posture);
+  const headX = -7;
+  // Keep the largest ears inside the native raster at maximum clearance.
+  const headY = Math.max(-15, bodyY - Math.max(0, visual.posture));
   const rear = bodyX + bodyRx - 1;
   const tailReach = 4 + visual.tailLength;
   const tailWidth = clamp(2 + visual.tailDepth, 1, 3);
+  // Longer tails curl upward near the right edge instead of being cropped.
+  const tailEnd = Math.min(rear + tailReach, 17 - Math.floor(tailWidth / 2));
+  const tailRise = 2 + Math.max(0, rear + tailReach - tailEnd);
 
   // The short juvenile tail stays attached to the rump and curls gently up.
-  builder.line(rear - 1, bodyY, rear + Math.max(2, tailReach - 2), bodyY - 2, tailWidth, 'b', PART.tail);
-  builder.line(rear + Math.max(2, tailReach - 2), bodyY - 2, rear + tailReach, bodyY, tailWidth, 's', PART.tail);
+  builder.line(rear - 1, bodyY, tailEnd - 1, bodyY - 2, tailWidth, 'b', PART.tail);
+  builder.line(tailEnd - 1, bodyY - 2, tailEnd, bodyY - tailRise, tailWidth, 'b', PART.tail);
 
-  const legWidth = clamp(2 + visual.limbBuild, 1, 3);
-  const frontFar = -3;
-  const rearFar = 9 + visual.bodyLength;
-  const frontNear = -8;
-  const rearNear = 4 + Math.round(visual.bodyLength / 2);
+  const legWidth = clamp(2 + visual.limbBuild, 2, 3);
+  const frontFar = -1;
+  const rearFar = 10 + visual.bodyLength;
+  const frontNear = -6;
+  const rearNear = 5 + Math.round(visual.bodyLength / 2);
   const legTop = bodyBottom - 2;
   addLeg(builder, frontFar, legTop, legWidth, PART.legFarFront, gaitOffset(gaitFrame, 1));
   addLeg(builder, rearFar, legTop, legWidth, PART.legFarRear, gaitOffset(gaitFrame, 0));
 
   // Two small dorsal structures keep the recognizable juvenile silhouette.
-  builder.ear(bodyX + 1, bodyY - bodyRy + 2, 3, -1, PART.ridge);
-  builder.ear(bodyX + 6, bodyY - bodyRy + 2, 2, 0, PART.ridge);
+  builder.ellipse(bodyX + 1, bodyY - bodyRy + 1, 2, 2, 'b', PART.ridge);
+  builder.ellipse(bodyX + 6, bodyY - bodyRy + 1, 2, 1, 'b', PART.ridge);
 
   builder.ellipse(bodyX, bodyY, bodyRx, bodyRy, 'b', PART.body);
   builder.ellipse(bodyX - 1, bodyBottom - 1, Math.max(5, bodyRx - 3 + visual.creamCoverage), 2, 'c', PART.body);
@@ -305,13 +310,14 @@ function buildStand(builder: RasterBuilder, visual: VisualAnatomy, gaitFrame: nu
   addLeg(builder, frontNear, legTop, legWidth, PART.legNearFront, gaitOffset(gaitFrame, 0));
   addLeg(builder, rearNear, legTop, legWidth, PART.legNearRear, gaitOffset(gaitFrame, 1));
 
-  const earHeight = 5 + visual.earSize;
+  const earHeight = Math.min(5 + visual.earSize, 24 + headY - 4);
   const earBaseY = headY - 4;
   builder.ear(headX + 4, earBaseY, earHeight, 1 - visual.earLift, PART.earFar);
   builder.ear(headX - 3, earBaseY, earHeight, -1 + visual.earLift, PART.earNear);
-  builder.ellipse(headX, headY, 7, 6, 'c', PART.head);
+  builder.ellipse(headX, headY, 8, 6, 'c', PART.head);
   // A small slate crown joins face, ears and continuous body.
-  builder.line(headX - 5, headY - 5, headX + 5, headY - 5, 2, 's', PART.head);
+  builder.line(headX - 5, headY - 5, headX + 5, headY - 5, 1, 'b', PART.head);
+  builder.rect(headX - 1, headY - 4, 3, 1, 'b', PART.head);
   builder.line(headX + 3, headY - 4, headX + 6, headY - 1, 2, 'b', PART.head);
 
   return {
@@ -320,8 +326,8 @@ function buildStand(builder: RasterBuilder, visual: VisualAnatomy, gaitFrame: nu
     bodyX,
     bodyY,
     bodyRy,
-    mouth: { x: headX - 6, y: headY + 3 },
-    tailTip: { x: rear + tailReach, y: bodyY },
+    mouth: { x: headX - 2, y: headY + 3 },
+    tailTip: { x: tailEnd, y: bodyY - tailRise },
   };
 }
 
@@ -330,17 +336,20 @@ function buildSleep(builder: RasterBuilder, visual: VisualAnatomy): BuildLandmar
   const bodyRy = 4 + visual.bodyDepth;
   const bodyX = 2;
   const bodyY = -5 - Math.max(0, visual.posture);
-  const headX = -9;
+  const headX = -8;
   const headY = -6 - Math.max(0, visual.posture);
   const rear = bodyX + bodyRx - 1;
   const tailReach = 4 + visual.tailLength;
   const tailWidth = clamp(2 + visual.tailDepth, 1, 3);
+  // Longer tails curl upward near the right edge instead of being cropped.
+  const tailEnd = Math.min(rear + tailReach, 17 - Math.floor(tailWidth / 2));
+  const tailRise = 2 + Math.max(0, rear + tailReach - tailEnd);
 
-  builder.line(rear - 2, bodyY - 1, rear + Math.max(2, tailReach - 2), bodyY - 3, tailWidth, 'b', PART.tail);
-  builder.line(rear + Math.max(2, tailReach - 2), bodyY - 3, rear + tailReach, bodyY - 1, tailWidth, 's', PART.tail);
+  builder.line(rear - 2, bodyY - 1, tailEnd - 1, bodyY - 3, tailWidth, 'b', PART.tail);
+  builder.line(tailEnd - 1, bodyY - 3, tailEnd, bodyY - 1 - tailRise, tailWidth, 'b', PART.tail);
 
-  builder.ear(bodyX + 2, bodyY - bodyRy + 2, 2, -1, PART.ridge);
-  builder.ear(bodyX + 6, bodyY - bodyRy + 2, 2, 0, PART.ridge);
+  builder.ellipse(bodyX + 2, bodyY - bodyRy + 1, 2, 1, 'b', PART.ridge);
+  builder.ellipse(bodyX + 6, bodyY - bodyRy + 1, 2, 1, 'b', PART.ridge);
   builder.ellipse(bodyX, bodyY, bodyRx, bodyRy, 'b', PART.body);
   builder.ellipse(bodyX - 1, -3, Math.max(6, bodyRx - 3 + visual.creamCoverage), 2, 'c', PART.body);
   builder.line(bodyX, bodyY - bodyRy + 1, bodyX + 6, bodyY - bodyRy + 1, 1, 's', PART.body);
@@ -349,7 +358,7 @@ function buildSleep(builder: RasterBuilder, visual: VisualAnatomy): BuildLandmar
   const earBaseY = headY - 3;
   builder.ear(headX + 4, earBaseY, earHeight, 2 - visual.earLift, PART.earFar);
   builder.ear(headX - 2, earBaseY, earHeight, -2 + visual.earLift, PART.earNear);
-  builder.ellipse(headX, headY, 7, 5, 'c', PART.head);
+  builder.ellipse(headX, headY, 8, 5, 'c', PART.head);
   builder.line(headX - 5, headY - 4, headX + 4, headY - 4, 2, 's', PART.head);
   builder.line(headX + 3, headY - 3, headX + 6, headY - 1, 2, 'b', PART.head);
 
@@ -366,8 +375,8 @@ function buildSleep(builder: RasterBuilder, visual: VisualAnatomy): BuildLandmar
     bodyX,
     bodyY,
     bodyRy,
-    mouth: { x: headX - 6, y: headY + 2 },
-    tailTip: { x: rear + tailReach, y: bodyY - 1 },
+    mouth: { x: headX - 2, y: headY + 3 },
+    tailTip: { x: tailEnd, y: bodyY - 1 - tailRise },
   };
 }
 
@@ -376,18 +385,19 @@ function addFace(builder: RasterBuilder, landmarks: BuildLandmarks, pose: Creatu
   const eyeY = headY - (pose === 'stand' ? 1 : 0);
   const eyes = [
     { x: headX - 3, part: PART.eyeNear },
-    { x: headX + 2, part: PART.eyeFar },
+    { x: headX + 3, part: PART.eyeFar },
   ];
   for (const eye of eyes) {
     if (blink || pose === 'sleep') {
       builder.rect(eye.x - 1, eyeY, 3, 1, 'o', eye.part);
     } else {
-      builder.rect(eye.x - 1, eyeY - 1, 3, 3, 'e', eye.part);
+      builder.rect(eye.x - 1, eyeY - 1, 3, eye.part === PART.eyeNear ? 4 : 3, 'e', eye.part);
       builder.set(eye.x - 1, eyeY - 1, 'w', eye.part);
     }
   }
-  builder.set(headX - 6, headY + 2, 'o', PART.head);
-  builder.rect(headX - 4, headY + 4, 3, 1, 'o', PART.head);
+  builder.set(headX - 3, headY + 3, 'o', PART.head);
+  builder.set(headX - 2, headY + 4, 'o', PART.head);
+  builder.set(headX - 1, headY + 3, 'o', PART.head);
 }
 
 function makeRows(builder: RasterBuilder): { rows: string[]; partRows: string[] } {
